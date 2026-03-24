@@ -71,7 +71,7 @@
       <Private>True</Private>
     </Reference>
     <Reference Include="StackExchange.Redis">
-      <HintPath>packages\StackExchange.Redis.2.6.122\lib\net472\StackExchange.Redis.dll</HintPath>
+      <HintPath>packages\StackExchange.Redis.2.2.88\lib\net461\StackExchange.Redis.dll</HintPath>
       <Private>True</Private>
     </Reference>
   </ItemGroup>

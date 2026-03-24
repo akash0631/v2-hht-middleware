@@ -19,7 +19,7 @@ namespace V2HHTMiddleware.Infrastructure
     public static class HHTCache
     {
         private static readonly object _initLock = new object();
-        private static IConnectionMultiplexer _conn;
+        private static ConnectionMultiplexer _conn;
         private static bool _initialized;
 
         private static IDatabase Db

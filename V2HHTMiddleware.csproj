@@ -70,10 +70,15 @@
       <HintPath>packages\WebActivatorEx.2.0.0\lib\net40\WebActivatorEx.dll</HintPath>
       <Private>True</Private>
     </Reference>
+    <Reference Include="StackExchange.Redis">
+      <HintPath>packages\StackExchange.Redis.2.7.33\lib\net472\StackExchange.Redis.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="App_Start\WebApiConfig.cs" />
+    <Compile Include="Infrastructure\HHTCache.cs" />
     <Compile Include="Controllers\HHT\HHTBaseHandler.cs" />
     <Compile Include="Controllers\HHT\HHTController.cs" />
     <Compile Include="Controllers\HHT\HHTRouter.cs" />

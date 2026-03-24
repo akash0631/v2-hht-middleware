@@ -70,20 +70,21 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
                 string werks  = lipsTable.RowCount > 0 ? lipsTable[0].GetString("WERKS") : "DC";
                 string cacheKey = (_qa ? "QA_" : "P_") + werks;
 
-                string binMc;
-                if (_binMcCache.TryGetValue(cacheKey, out var cached) &&
-                    cached.Expiry > System.DateTime.UtcNow)
+                // Try Redis first, fall back to in-memory, then SAP
+                string binMc = V2HHTMiddleware.Infrastructure.HHTCache.GetBinMc(werks, _qa);
+                if (binMc == null)
                 {
-                    binMc = cached.Data;  // ✅ cache hit — skip the slow SAP bin scan
-                }
-                else
-                {
-                    binMc = Tbl(fn.GetTable("ET_BIN_MC"), "LGPLA", "MATNR", "VEMNG");
-                    _binMcCache[cacheKey] = new CachedBinMc
+                    if (_binMcCache.TryGetValue(cacheKey, out var inMem) &&
+                        inMem.Expiry > System.DateTime.UtcNow)
                     {
-                        Data   = binMc,
-                        Expiry = System.DateTime.UtcNow.AddMinutes(10)
-                    };
+                        binMc = inMem.Data;
+                    }
+                    else
+                    {
+                        binMc = Tbl(fn.GetTable("ET_BIN_MC"), "LGPLA", "MATNR", "VEMNG");
+                        _binMcCache[cacheKey] = new CachedBinMc { Data = binMc, Expiry = System.DateTime.UtcNow.AddMinutes(10) };
+                        V2HHTMiddleware.Infrastructure.HHTCache.SetBinMc(werks, binMc, _qa);
+                    }
                 }
 
                 // Response: S # header # lips ! ean ! binmc

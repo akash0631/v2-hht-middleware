@@ -36,11 +36,27 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // ── BINS ──────────────────────────────────────────────────────────────────
     public class StoreGetBinHandler : HHTBaseHandler {
         readonly bool _qa; public StoreGetBinHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_BIN");f.SetValue("IM_WERKS",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"))+"!";return"S#"+Tbl(f.GetTable("ET_LAGP"),"LGPLA")+"!";}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            string werks=P(1);
+            // Cache bin list per store — bins don't change during a shift
+            string cacheKey=(_qa?"qa:":"")+werks;
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetBins(cacheKey);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_BIN");f.SetValue("IM_WERKS",werks);f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"))+"!";
+            var result="S#"+Tbl(f.GetTable("ET_LAGP"),"LGPLA")+"!";
+            V2HHTMiddleware.Infrastructure.HHTCache.SetBins(cacheKey,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class StoreGetBinV2Handler : HHTBaseHandler {
         readonly bool _qa; public StoreGetBinV2Handler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_BIN_V2");f.SetValue("IM_WERKS",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"))+"!";return"S#"+Tbl(f.GetTable("ET_LAGP"),"LGPLA")+"!";}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            string werks=P(1),cacheKey="v2:"+(_qa?"qa:":"")+werks;
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetBins(cacheKey);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_BIN_V2");f.SetValue("IM_WERKS",werks);f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"))+"!";
+            var result="S#"+Tbl(f.GetTable("ET_LAGP"),"LGPLA")+"!";
+            V2HHTMiddleware.Infrastructure.HHTCache.SetBins(cacheKey,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     // ET_STOCK fields verified: MATERIAL, AVL_STOCK, OPEN_STOCK, SCAN_QTY, BIN (no LGPLA confusion)
     public class StoreGetBinStockHandler : HHTBaseHandler {
@@ -90,7 +106,14 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // FIX: ET_SLOC_DST and ET_SLOC_SRC only have LGORT (LGOBE not in RFC)
     public class GetSlocHandler : HHTBaseHandler {
         readonly bool _qa; public GetSlocHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_SLOC");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_WM_MANAGED","");f.SetValue("IM_LGNUM","SDC");f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_SLOC_DST"),"LGORT")+"!"+Tbl(f.GetTable("ET_SLOC_SRC"),"LGORT");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            string werks=P(1),ck=(_qa?"qa:":"")+werks;
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetSloc(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_SLOC");f.SetValue("IM_WERKS",werks);f.SetValue("IM_WM_MANAGED","");f.SetValue("IM_LGNUM","SDC");f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+Tbl(f.GetTable("ET_SLOC_DST"),"LGORT")+"!"+Tbl(f.GetTable("ET_SLOC_SRC"),"LGORT");
+            V2HHTMiddleware.Infrastructure.HHTCache.SetSloc(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
 
     // ── PICKLIST / PICKING ────────────────────────────────────────────────────
@@ -272,7 +295,13 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     }
     public class GetPackingMaterialHandler : HHTBaseHandler {
         readonly bool _qa; public GetPackingMaterialHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_GET_PACKING_MATERIAL");f.SetValue("IM_LGNUM","V2R");f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_PACK_MAT"),"MATNR","MAKTX");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetPackMats("V2R");
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_GET_PACKING_MATERIAL");f.SetValue("IM_LGNUM","V2R");f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+Tbl(f.GetTable("ET_PACK_MAT"),"MATNR","MAKTX");
+            V2HHTMiddleware.Infrastructure.HHTCache.SetPackMats("V2R",result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
 
     // ── MAJOR CAT ─────────────────────────────────────────────────────────────
@@ -280,7 +309,14 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     //      (NOT SEG,DIV,SDIV,MCAT,MC as before)
     public class StoreGetMajorCatHandler : HHTBaseHandler {
         readonly bool _qa; public StoreGetMajorCatHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_MAJOR_CAT");f.SetValue("IM_WERKS",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_DATA"),"DIVISION","SUB_DIVISION","MAJ_CAT","MATKL","MC_DESC","MAJ_CAT_CD","MAJ_CAT_STAT","SEASON");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            string werks=P(1),ck=(_qa?"qa:":"")+werks;
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetMajorCat(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_MAJOR_CAT");f.SetValue("IM_WERKS",werks);f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+Tbl(f.GetTable("ET_DATA"),"DIVISION","SUB_DIVISION","MAJ_CAT","MATKL","MC_DESC","MAJ_CAT_CD","MAJ_CAT_STAT","SEASON");
+            V2HHTMiddleware.Infrastructure.HHTCache.SetMajorCat(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     // IM_ inputs verified: IM_WERKS, IM_SEG, IM_DIVISION, IM_SUB_DIV, IM_MAJ_CAT, IM_MC
     public class StoreGetMajorCatDataHandler : HHTBaseHandler {

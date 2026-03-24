@@ -24,30 +24,33 @@ jobs:
       - name: Build and Package
         shell: powershell
         run: |
+          # Publish to folder first (FileSystem), then zip it
+          # azure/webapps-deploy doesn't accept MSDeploy .zip format
           msbuild V2HHTMiddleware.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
             /p:VisualStudioVersion=17.0 `
             /p:DeployOnBuild=true `
-            /p:WebPublishMethod=Package `
-            /p:PackageAsSingleFile=true `
-            /p:PackageLocation="${{ github.workspace }}\publish\package.zip" `
-            /p:SkipInvalidConfigurations=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl="${{ github.workspace }}\published" `
+            /p:DeleteExistingFiles=true `
             /m /v:minimal
 
-      - name: Verify package
+      - name: Zip published output
         shell: powershell
         run: |
-          $zip = Get-ChildItem "${{ github.workspace }}\publish" -Filter "*.zip" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($zip) { Write-Host "✅ Package ready: $($zip.Name) ($([math]::Round($zip.Length/1MB,1)) MB)" }
-          else { Write-Error "❌ No package found. Build failed silently." }
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\deploy" | Out-Null
+          Compress-Archive -Path "${{ github.workspace }}\published\*" `
+            -DestinationPath "${{ github.workspace }}\deploy\app.zip" -Force
+          $size = [math]::Round((Get-Item "${{ github.workspace }}\deploy\app.zip").Length/1MB, 1)
+          Write-Host "✅ app.zip ready: ${size} MB"
 
       - name: Deploy to Azure App Service
         uses: azure/webapps-deploy@v3
         with:
           app-name: v2-hht-api
           publish-profile: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
-          package: '${{ github.workspace }}\publish\*.zip'
+          package: '${{ github.workspace }}\deploy\app.zip'
 
       - name: Smoke test
         shell: powershell

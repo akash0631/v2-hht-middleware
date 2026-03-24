@@ -24,22 +24,30 @@ jobs:
       - name: Build & Package
         shell: powershell
         run: |
+          # Platform="Any CPU" matches the solution config (project PlatformTarget=x64 handles 64-bit)
           msbuild V2HHTMiddleware.sln `
             /p:Configuration=Release `
-            /p:Platform="x64" `
+            /p:Platform="Any CPU" `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=Package `
             /p:PackageAsSingleFile=true `
-            /p:PackageLocation="publish\package.zip" `
+            /p:PackageLocation="${{ github.workspace }}\publish\package.zip" `
             /p:SkipInvalidConfigurations=true `
             /m /v:minimal
+
+      - name: Verify package exists
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem "${{ github.workspace }}\publish" -Filter "*.zip" -Recurse -ErrorAction SilentlyContinue
+          if ($zip) { Write-Host "✅ Package: $($zip.FullName) ($([math]::Round($zip.Length/1MB,1)) MB)" }
+          else { Get-ChildItem "${{ github.workspace }}\publish" -Recurse; throw "No package found" }
 
       - name: Deploy to Azure
         uses: azure/webapps-deploy@v3
         with:
           app-name: v2-hht-api
           publish-profile: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
-          package: publish\*.zip
+          package: '${{ github.workspace }}\publish\*.zip'
 
       - name: Smoke test
         shell: powershell

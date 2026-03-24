@@ -24,10 +24,26 @@ jobs:
       - name: Build & Package
         shell: powershell
         run: |
-          # Platform="Any CPU" matches the solution config (project PlatformTarget=x64 handles 64-bit)
+          # Locate Microsoft.WebApplication.targets on the runner
+          $vsRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+          $targets = Get-ChildItem "$vsRoot\MSBuild\Microsoft\VisualStudio" -Recurse -Filter "Microsoft.WebApplication.targets" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($targets) {
+            $vsToolsPath = $targets.DirectoryName.TrimEnd('\WebApplications').TrimEnd('\')
+            # Go up one level from WebApplications folder to get VSToolsPath
+            $vsToolsPath = Split-Path $targets.DirectoryName -Parent
+            Write-Host "VSToolsPath: $vsToolsPath"
+          } else {
+            # Fallback: copy from VS install
+            $waPath = "$vsRoot\MSBuild\Microsoft\VisualStudio\v17.0\WebApplications"
+            $fallback = "C:\Program Files (x86)\MSBuild\Microsoft\VisualStudio\v17.0\WebApplications"
+            $vsToolsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0"
+            Write-Host "Using default VSToolsPath: $vsToolsPath"
+          }
+          
           msbuild V2HHTMiddleware.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
+            /p:VSToolsPath="$vsToolsPath" `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=Package `
             /p:PackageAsSingleFile=true `

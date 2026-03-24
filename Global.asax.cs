@@ -1,5 +1,6 @@
 using System.Web;
 using System.Web.Http;
+using V2HHTMiddleware.App_Start;
 
 namespace V2HHTMiddleware
 {
@@ -8,6 +9,9 @@ namespace V2HHTMiddleware
         protected void Application_Start()
         {
             GlobalConfiguration.Configure(WebApiConfig.Register);
+
+            // Pre-warm SAP connection pool at startup
+            HHTBaseHandler.InitializeSapPool();
         }
     }
 }

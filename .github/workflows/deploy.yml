@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-deploy:
-    runs-on: windows-latest   # .NET 4.8 + SAP NCo x64 requires Windows
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -21,29 +21,13 @@ jobs:
       - name: NuGet Restore
         run: nuget restore V2HHTMiddleware.sln -NonInteractive
 
-      - name: Build & Package
+      - name: Build and Package
         shell: powershell
         run: |
-          # Locate Microsoft.WebApplication.targets on the runner
-          $vsRoot = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
-          $targets = Get-ChildItem "$vsRoot\MSBuild\Microsoft\VisualStudio" -Recurse -Filter "Microsoft.WebApplication.targets" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($targets) {
-            $vsToolsPath = $targets.DirectoryName.TrimEnd('\WebApplications').TrimEnd('\')
-            # Go up one level from WebApplications folder to get VSToolsPath
-            $vsToolsPath = Split-Path $targets.DirectoryName -Parent
-            Write-Host "VSToolsPath: $vsToolsPath"
-          } else {
-            # Fallback: copy from VS install
-            $waPath = "$vsRoot\MSBuild\Microsoft\VisualStudio\v17.0\WebApplications"
-            $fallback = "C:\Program Files (x86)\MSBuild\Microsoft\VisualStudio\v17.0\WebApplications"
-            $vsToolsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0"
-            Write-Host "Using default VSToolsPath: $vsToolsPath"
-          }
-          
           msbuild V2HHTMiddleware.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
-            /p:VSToolsPath="$vsToolsPath" `
+            /p:VisualStudioVersion=17.0 `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=Package `
             /p:PackageAsSingleFile=true `
@@ -51,14 +35,14 @@ jobs:
             /p:SkipInvalidConfigurations=true `
             /m /v:minimal
 
-      - name: Verify package exists
+      - name: Verify package
         shell: powershell
         run: |
-          $zip = Get-ChildItem "${{ github.workspace }}\publish" -Filter "*.zip" -Recurse -ErrorAction SilentlyContinue
-          if ($zip) { Write-Host "✅ Package: $($zip.FullName) ($([math]::Round($zip.Length/1MB,1)) MB)" }
-          else { Get-ChildItem "${{ github.workspace }}\publish" -Recurse; throw "No package found" }
+          $zip = Get-ChildItem "${{ github.workspace }}\publish" -Filter "*.zip" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($zip) { Write-Host "✅ Package ready: $($zip.Name) ($([math]::Round($zip.Length/1MB,1)) MB)" }
+          else { Write-Error "❌ No package found. Build failed silently." }
 
-      - name: Deploy to Azure
+      - name: Deploy to Azure App Service
         uses: azure/webapps-deploy@v3
         with:
           app-name: v2-hht-api
@@ -71,8 +55,8 @@ jobs:
           Start-Sleep 25
           try {
             $r = Invoke-WebRequest "https://v2-hht-api.azurewebsites.net/api/hht/health" -UseBasicParsing -TimeoutSec 30
-            Write-Host "✅ $($r.Content)"
+            Write-Host "✅ Live: $($r.Content)"
           } catch {
-            Write-Host "⚠️ Health check skipped (SAP not connected yet): $_"
+            Write-Host "⚠️  Health check pending SAP connection: $_"
           }
           exit 0

@@ -16,11 +16,81 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
     }
     public class ScnDeliveryHandler : HHTBaseHandler {
         readonly bool _qa; public ScnDeliveryHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DELIVERY_GET_DETAILS");f.SetValue("IM_VBELN",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_LIPS"),"MATNR","LGMNG","MEINS","WERKS","LGORT")+"!"+EanData(f.GetTable("ET_EAN_DATA"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DELIVERY_GET_DETAILS");f.SetValue("IM_VBELN",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));var likp=f.GetStructure("EX_LIKP");var hdr=likp.GetString("KUNNR")+"#"+likp.GetString("VBELN");return"S#"+hdr+"#"+Tbl(f.GetTable("ET_LIPS"),"MATNR","WERKS","LGORT","CHARG","LFIMG","VRKME","ORMNG")+"!"+EanData(f.GetTable("ET_EAN_DATA"));}catch(System.Exception e){return Err(e.Message);}}
     }
-    public class ScnSelHandler : HHTBaseHandler {
-        readonly bool _qa; public ScnSelHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DELIVERY_GET_DETAILS_PLP2");f.SetValue("IM_VBELN",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_LIPS"),"MATNR","LGMNG","MEINS","WERKS","LGORT")+"!"+EanData(f.GetTable("ET_EAN_DATA"))+"!"+Tbl(f.GetTable("ET_BIN_MC"),"LGPLA","MATNR","VEMNG");}catch(System.Exception e){return Err(e.Message);}}
+    public class ScnSelHandler : HHTBaseHandler
+    {
+        readonly bool _qa;
+        public ScnSelHandler(bool qa) { _qa = qa; }
+
+        // ── ET_BIN_MC in-memory cache ─────────────────────────────────────────
+        // ET_BIN_MC = full bin-material map for the DC warehouse.
+        // It's the same for every delivery from a given site and barely changes
+        // during a shift — cache it per WERKS for 10 minutes to avoid the
+        // full warehouse bin scan on every scnsel call.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CachedBinMc>
+            _binMcCache = new System.Collections.Concurrent.ConcurrentDictionary<string, CachedBinMc>();
+
+        private class CachedBinMc
+        {
+            public string Data;
+            public System.DateTime Expiry;
+        }
+
+        public override string Execute()
+        {
+            try
+            {
+                var dest = _qa ? QA() : Prod();
+                var fn   = dest.Repository.CreateFunction("ZWM_DELIVERY_GET_DETAILS_PLP2");
+                fn.SetValue("IM_VBELN", P(1));
+                fn.Invoke(dest);
+
+                var ret = fn.GetStructure("EX_RETURN");
+                if (ret.GetString("TYPE") == "E")
+                    return Err(ret.GetString("MESSAGE"));
+
+                // ── ET_LIPS — correct fields from original Java implementation ─
+                // MATNR, WERKS, LGORT, CHARG, LFIMG, VRKME, ORMNG,
+                // MANDT, MATKL, WGBEZ, VLPLA, VISTM, VEMNG, CRATE, REMAIN_QTY
+                var lips = Tbl(fn.GetTable("ET_LIPS"),
+                    "MATNR", "WERKS", "LGORT", "CHARG", "LFIMG", "VRKME", "ORMNG",
+                    "MANDT", "MATKL", "WGBEZ", "VLPLA", "VISTM", "VEMNG", "CRATE", "REMAIN_QTY");
+
+                // ── EX_LIKP — delivery header (customer + delivery no) ─────────
+                var likp   = fn.GetStructure("EX_LIKP");
+                var header = likp.GetString("KUNNR") + "#" + likp.GetString("VBELN");
+
+                // ── ET_EAN_DATA ───────────────────────────────────────────────
+                var ean = EanData(fn.GetTable("ET_EAN_DATA"));
+
+                // ── ET_BIN_MC — cache by WERKS (DC site) for 10 minutes ───────
+                // Extract WERKS from first LIPS row for cache key
+                var lipsTable = fn.GetTable("ET_LIPS");
+                string werks  = lipsTable.RowCount > 0 ? lipsTable[0].GetString("WERKS") : "DC";
+                string cacheKey = (_qa ? "QA_" : "P_") + werks;
+
+                string binMc;
+                if (_binMcCache.TryGetValue(cacheKey, out var cached) &&
+                    cached.Expiry > System.DateTime.UtcNow)
+                {
+                    binMc = cached.Data;  // ✅ cache hit — skip the slow SAP bin scan
+                }
+                else
+                {
+                    binMc = Tbl(fn.GetTable("ET_BIN_MC"), "LGPLA", "MATNR", "VEMNG");
+                    _binMcCache[cacheKey] = new CachedBinMc
+                    {
+                        Data   = binMc,
+                        Expiry = System.DateTime.UtcNow.AddMinutes(10)
+                    };
+                }
+
+                // Response: S # header # lips ! ean ! binmc
+                return "S#" + header + "#" + lips + "!" + ean + "!" + binMc;
+            }
+            catch (System.Exception ex) { return Err(ex.Message); }
+        }
     }
     public class DisRecHandler : HHTBaseHandler {
         readonly bool _qa; public DisRecHandler(bool qa){_qa=qa;}

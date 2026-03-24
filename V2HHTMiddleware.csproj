@@ -74,6 +74,18 @@
       <HintPath>packages\StackExchange.Redis.2.2.88\lib\net461\StackExchange.Redis.dll</HintPath>
       <Private>True</Private>
     </Reference>
+    <Reference Include="System.Memory">
+      <HintPath>packages\System.Memory.4.5.5\lib\net461\System.Memory.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="System.Buffers">
+      <HintPath>packages\System.Buffers.4.5.1\lib\net461\System.Buffers.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="System.Runtime.CompilerServices.Unsafe">
+      <HintPath>packages\System.Runtime.CompilerServices.Unsafe.6.0.0\lib\net461\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

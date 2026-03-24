@@ -1,0 +1,13 @@
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+publish/
+*.log
+
+# Allow SAP NCo DLLs (not on NuGet — must be committed)
+!packages/sapnco_x64.3.0.18/
+!packages/sapnco_x64.3.0.18/lib/
+!packages/sapnco_x64.3.0.18/lib/sapnco.dll
+!packages/sapnco_x64.3.0.18/lib/sapnco_utils.dll

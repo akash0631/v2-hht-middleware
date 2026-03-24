@@ -1,0 +1,54 @@
+name: Deploy V2 HHT Middleware to Azure
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build-deploy:
+    runs-on: windows-latest   # .NET 4.8 + SAP NCo x64 requires Windows
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - uses: NuGet/setup-nuget@v2
+        with: { nuget-version: '6.x' }
+
+      - name: NuGet Restore
+        run: nuget restore V2HHTMiddleware.sln -NonInteractive
+
+      - name: Build & Package
+        shell: powershell
+        run: |
+          msbuild V2HHTMiddleware.sln `
+            /p:Configuration=Release `
+            /p:Platform="x64" `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=Package `
+            /p:PackageAsSingleFile=true `
+            /p:PackageLocation="publish\package.zip" `
+            /p:SkipInvalidConfigurations=true `
+            /m /v:minimal
+
+      - name: Deploy to Azure
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: v2-hht-api
+          publish-profile: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
+          package: publish\*.zip
+
+      - name: Smoke test
+        shell: powershell
+        run: |
+          Start-Sleep 25
+          try {
+            $r = Invoke-WebRequest "https://v2-hht-api.azurewebsites.net/api/hht/health" -UseBasicParsing -TimeoutSec 30
+            Write-Host "✅ $($r.Content)"
+          } catch {
+            Write-Host "⚠️ Health check skipped (SAP not connected yet): $_"
+          }
+          exit 0

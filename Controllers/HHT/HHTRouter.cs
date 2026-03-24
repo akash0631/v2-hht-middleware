@@ -134,7 +134,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             { "zwm_rfc_store_ean_data_stk",  qa => new RfcStoreEanDataStkHandler(qa) },
             { "zwm_rfc_validate_crate",      qa => new RfcValidateCrateHandler(qa) },
             { "getgrdetails",                qa => new GetGrDetailsHandler(qa) },
-            { "getGRDetails",                qa => new GetGrDetailsHandler(qa) },
             { "zwm_to_create_from_gr_data",  qa => new CreateToFromGrDataHandler(qa) },
 
             // ── DC: NIT ─────────────────────────────────────────────────────────
@@ -174,7 +173,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             // ── DC: CRATE ───────────────────────────────────────────────────────
             { "validatecrateto",             qa => new ValidateCrateToHandler(qa) },
             { "savecrate",                   qa => new SaveCrateHandler(qa) },
-            { "SaveCrate",                   qa => new SaveCrateHandler(qa) },
             { "zwm_validate_external_hu",    qa => new ValidateExternalHuHandler(qa) },
         };
 

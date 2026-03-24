@@ -21,46 +21,65 @@ jobs:
       - name: NuGet Restore
         run: nuget restore V2HHTMiddleware.sln -NonInteractive
 
-      - name: Build + Publish (full web deploy package)
+      - name: Build
         shell: powershell
         run: |
-          # Use MSBuild WebPublish to get ALL required DLLs automatically
           msbuild V2HHTMiddleware.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl="${{ github.workspace }}\publish_output" `
-            /p:DeleteExistingFiles=True `
             /p:VisualStudioVersion=17.0 `
             /m /v:minimal
 
-          Write-Host "Published files:"
-          Get-ChildItem "${{ github.workspace }}\publish_output" -Recurse -File | Select-Object FullName | Format-Table
-          Write-Host "bin DLLs:"
-          $binPath = "${{ github.workspace }}\publish_output\bin"
-          if (Test-Path $binPath) {
-            Get-ChildItem "$binPath\*.dll" | Select-Object Name | Format-Table
-          } else {
-            Write-Host "No bin subfolder - DLLs are in publish root"
-            Get-ChildItem "${{ github.workspace }}\publish_output\*.dll" | Select-Object Name | Format-Table
-          }
-
-      - name: Package for Azure (plain zip)
+      - name: Package for Azure (full dependency zip)
         shell: powershell
         run: |
-          $publishDir = "${{ github.workspace }}\publish_output"
-          $zipPath    = "${{ github.workspace }}\deploy\app.zip"
+          # Find build output
+          $binDir = Get-ChildItem -Path "." -Recurse -Filter "V2HHTMiddleware.dll" |
+            Where-Object { $_.DirectoryName -notmatch "obj" } |
+            Select-Object -First 1 -ExpandProperty DirectoryName
+          Write-Host "Build output: $binDir"
+
+          # Create deploy structure
+          $deployDir = "${{ github.workspace }}\deploy_content"
+          New-Item -ItemType Directory -Force -Path "$deployDir\bin" | Out-Null
+
+          # Copy ALL DLLs from build output
+          Copy-Item "$binDir\*.dll" "$deployDir\bin\" -Force
+          Copy-Item "$binDir\*.pdb" "$deployDir\bin\" -Force -ErrorAction SilentlyContinue
+
+          # Copy missing DLLs from NuGet packages that MSBuild doesnt auto-copy
+          $packages = "${{ github.workspace }}\packages"
+
+          # System.Net.Http.Formatting (WebAPI client)
+          $fmt = Get-ChildItem "$packages\Microsoft.AspNet.WebApi.Client*" -Recurse -Filter "System.Net.Http.Formatting.dll" | Select-Object -First 1
+          if ($fmt) { Copy-Item $fmt.FullName "$deployDir\bin\" -Force; Write-Host "✅ Formatting.dll" }
+
+          # Microsoft.Web.Infrastructure
+          $infra = Get-ChildItem "$packages\Microsoft.Web.Infrastructure*" -Recurse -Filter "Microsoft.Web.Infrastructure.dll" | Select-Object -First 1
+          if ($infra) { Copy-Item $infra.FullName "$deployDir\bin\" -Force; Write-Host "✅ Web.Infrastructure.dll" }
+
+          # WebActivatorEx
+          $wax = Get-ChildItem "$packages\WebActivatorEx*" -Recurse -Filter "WebActivatorEx.dll" | Select-Object -First 1
+          if ($wax) { Copy-Item $wax.FullName "$deployDir\bin\" -Force; Write-Host "✅ WebActivatorEx.dll" }
+
+          # StackExchange.Redis
+          $redis = Get-ChildItem "$packages\StackExchange.Redis*" -Recurse -Filter "StackExchange.Redis.dll" | Select-Object -First 1
+          if ($redis) { Copy-Item $redis.FullName "$deployDir\bin\" -Force; Write-Host "✅ StackExchange.Redis.dll" }
+
+          # Copy web files
+          Copy-Item "Web.config" "$deployDir\" -Force
+          Copy-Item "Global.asax" "$deployDir\" -Force -ErrorAction SilentlyContinue
+
+          # Show what we have
+          Write-Host "`n=== Final bin contents ==="
+          Get-ChildItem "$deployDir\bin\" | Select-Object Name, @{N='KB';E={[math]::Round($_.Length/1KB,1)}} | Format-Table
+
+          # Zip
+          $zipPath = "${{ github.workspace }}\deploy\app.zip"
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\deploy" | Out-Null
-
-          Add-Type -Assembly "System.IO.Compression.FileSystem"
-          [System.IO.Compression.ZipFile]::CreateFromDirectory($publishDir, $zipPath)
-
+          Compress-Archive -Path "$deployDir\*" -DestinationPath $zipPath -Force
           $size = [math]::Round((Get-Item $zipPath).Length/1MB, 2)
-          Write-Host "app.zip: ${size} MB"
-          Write-Host "Contents:"
-          [System.IO.Compression.ZipFile]::OpenRead($zipPath).Entries |
-            Select-Object Name | Format-Table
+          Write-Host "`napp.zip: ${size} MB ✅"
 
       - name: Deploy to Azure
         uses: azure/webapps-deploy@v3

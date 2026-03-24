@@ -124,13 +124,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
         readonly bool _qa; public StockTakeSaveV11Handler(bool qa){_qa=qa;}
         public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_SAVE_V11");var p=P(1).Split(',');f.SetValue("IM_USER",p[0]);var t=f.GetTable("IT_DATA");for(int i=1;i+8<p.Length;i+=9){t.Append();t.SetValue("WAREHOUSE",p[i]);t.SetValue("SITE",p[i+1]);t.SetValue("SLOC",p[i+2]);t.SetValue("CRATE",p[i+3]);t.SetValue("BIN_TYPE",p[i+4]);t.SetValue("BIN",p[i+5]);t.SetValue("MATERIAL",p[i+6]);t.SetValue("SCAN_QTY",p[i+7]);t.SetValue("KEY",p[i+8]);}f.Invoke(d);return OkOrErr(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
+    // FIX: IM_PARMS is a structure. Fields: TYPE, BIN (validate) / PICK_PUTAWAY,PLANT,DESTINATION_BIN etc (movement)
     public class StockValidateV21Handler : HHTBaseHandler {
         readonly bool _qa; public StockValidateV21Handler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_VALIDATE_V21");f.SetValue("IM_USER",P(1));f.SetValue("TYPE",P(2));f.SetValue("BIN",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_VALIDATE_V21");f.SetValue("IM_USER",P(1));var p=f.GetStructure("IM_PARMS");p.SetValue("TYPE",P(2));p.SetValue("BIN",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
+    // FIX: IM_PARMS structure. Fields: PICK_PUTAWAY,PLANT,WAREHOUSE,LOCATION,STORAGE_TYPE,BIN,DESTINATION_BIN
     public class StockMovementV21Handler : HHTBaseHandler {
         readonly bool _qa; public StockMovementV21Handler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_MOVEMENT_V21");f.SetValue("IM_USER",P(1));f.SetValue("PICK_PUTAWAY",P(2));f.SetValue("TYPE",P(3));f.SetValue("PLANT",P(4));f.SetValue("WAREHOUSE","V2R");f.SetValue("LOCATION","0001");f.SetValue("STORAGE_TYPE","E01");f.SetValue("BIN",P(5));f.SetValue("DESTINATION_BIN",P(6));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_MOVEMENT_V21");f.SetValue("IM_USER",P(1));var p=f.GetStructure("IM_PARMS");p.SetValue("PICK_PUTAWAY",P(2));p.SetValue("PLANT",P(4));p.SetValue("WAREHOUSE","V2R");p.SetValue("LOCATION","0001");p.SetValue("STORAGE_TYPE","E01");p.SetValue("BIN",P(5));p.SetValue("DESTINATION_BIN",P(6));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
     public class DcHuGrtValHandler : HHTBaseHandler {
         readonly bool _qa; public DcHuGrtValHandler(bool qa){_qa=qa;}
@@ -148,25 +150,28 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
         readonly bool _qa; public DcHuGrtSaveHandler(bool qa){_qa=qa;}
         public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DC_HUGRT_SAVE");var p=P(1).Split(',');f.SetValue("IM_WERKS",p[0]);f.SetValue("IM_USER",p[1]);f.SetValue("IM_SLGORT",p[2]);f.SetValue("IM_DLGORT",p[3]);var t=f.GetTable("IT_DATA");for(int i=4;i+1<p.Length;i+=2){t.Append();t.SetValue("LGPLA",p[i]);t.SetValue("EX_HU",p[i+1]);}f.Invoke(d);return OkOrErr(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
+    // FIX: IM_PARMS is a structure (not individual imports) for all CLA handlers
     public class ClaBinValidateHandler : HHTBaseHandler {
         readonly bool _qa; public ClaBinValidateHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_BIN_VALIDATE");f.SetValue("PALETTE",P(1));f.SetValue("CLABIN",P(2));f.SetValue("INDICATOR",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_BIN_VALIDATE");var p=f.GetStructure("IM_PARMS");p.SetValue("PALETTE",P(1));p.SetValue("CLABIN",P(2));p.SetValue("INDICATOR",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ClaHuValidateHandler : HHTBaseHandler {
         readonly bool _qa; public ClaHuValidateHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_HU_VALIDATE");f.SetValue("EXIDV",P(1));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_HU_VALIDATE");var p=f.GetStructure("IM_PARMS");p.SetValue("EXIDV",P(1));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ClaPaletteValidateHandler : HHTBaseHandler {
         readonly bool _qa; public ClaPaletteValidateHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_PALETTE_VALIDATE");f.SetValue("PALETTE",P(1));f.SetValue("INDICATOR",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_PALETTE_VALIDATE");var p=f.GetStructure("IM_PARMS");p.SetValue("PALETTE",P(1));p.SetValue("INDICATOR",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
+    // IM_DATA is a TABLE (not a structure) for this one
     public class ClaHuPaletteSaveHandler : HHTBaseHandler {
         readonly bool _qa; public ClaHuPaletteSaveHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_HU_PALETTE_SAVE");var p=P(1).Split(',');f.SetValue("EXIDV",p[0]);f.SetValue("WERKS",p[1]);f.SetValue("PALETTE",p[2]);var t=f.GetTable("IM_DATA");for(int i=3;i+1<p.Length;i+=2){t.Append();t.SetValue("EXIDV",p[i]);t.SetValue("PALETTE",p[i+1]);}f.Invoke(d);return OkOrErr(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_HU_PALETTE_SAVE");var p=P(1).Split(',');var t=f.GetTable("IM_DATA");for(int i=0;i+1<p.Length;i+=2){t.Append();t.SetValue("EXIDV",p[i]);t.SetValue("PALETTE",p[i+1]);}f.Invoke(d);return OkOrErr(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
+    // FIX: IM_PARMS structure
     public class ClaPaletteBinTagSaveHandler : HHTBaseHandler {
         readonly bool _qa; public ClaPaletteBinTagSaveHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_PALETTE_BIN_TAG_SAVE");f.SetValue("PALETTE",P(1));f.SetValue("CLABIN",P(2));f.SetValue("INDICATOR",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_CLA_PALETTE_BIN_TAG_SAVE");var p=f.GetStructure("IM_PARMS");p.SetValue("PALETTE",P(1));p.SetValue("CLABIN",P(2));p.SetValue("INDICATOR",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ValidateCrateToHandler : HHTBaseHandler {
         readonly bool _qa; public ValidateCrateToHandler(bool qa){_qa=qa;}

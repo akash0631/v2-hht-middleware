@@ -21,51 +21,40 @@ jobs:
       - name: NuGet Restore
         run: nuget restore V2HHTMiddleware.sln -NonInteractive
 
-      - name: Build
+      - name: Build + Publish (full web deploy package)
         shell: powershell
         run: |
+          # Use MSBuild WebPublish to get ALL required DLLs automatically
           msbuild V2HHTMiddleware.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl="${{ github.workspace }}\publish_output" `
+            /p:DeleteExistingFiles=True `
             /p:VisualStudioVersion=17.0 `
             /m /v:minimal
+
+          Write-Host "Published files:"
+          Get-ChildItem "${{ github.workspace }}\publish_output" -Recurse | Select-Object FullName | Format-Table
+          Write-Host "bin DLLs:"
+          Get-ChildItem "${{ github.workspace }}\publish_output\bin\*.dll" | Select-Object Name | Format-Table
 
       - name: Package for Azure (plain zip)
         shell: powershell
         run: |
-          # Find the bin/Release output directory
-          $binDir = Get-ChildItem -Path "." -Recurse -Filter "V2HHTMiddleware.dll" |
-            Where-Object { $_.DirectoryName -notmatch "obj" } |
-            Select-Object -First 1 -ExpandProperty DirectoryName
-
-          if (-not $binDir) {
-            Write-Error "Build output not found"
-            exit 1
-          }
-          Write-Host "Build output: $binDir"
-          Get-ChildItem $binDir | Select-Object Name, Length | Format-Table
-
-          # Create deploy folder with the structure Azure App Service expects
-          $deployDir = "${{ github.workspace }}\deploy_content"
-          New-Item -ItemType Directory -Force -Path "$deployDir\bin" | Out-Null
-
-          # Copy all DLLs to bin/
-          Copy-Item "$binDir\*.dll" "$deployDir\bin\" -Force
-          Copy-Item "$binDir\*.pdb" "$deployDir\bin\" -Force -ErrorAction SilentlyContinue
-
-          # Copy web files (Web.config, Global.asax, etc.)
-          Copy-Item "Web.config" "$deployDir\" -Force
-          Copy-Item "Global.asax" "$deployDir\" -Force -ErrorAction SilentlyContinue
-
-          # Zip it
-          $zipPath = "${{ github.workspace }}\deploy\app.zip"
+          $publishDir = "${{ github.workspace }}\publish_output"
+          $zipPath    = "${{ github.workspace }}\deploy\app.zip"
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\deploy" | Out-Null
-          Compress-Archive -Path "$deployDir\*" -DestinationPath $zipPath -Force
+
+          Add-Type -Assembly "System.IO.Compression.FileSystem"
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($publishDir, $zipPath)
 
           $size = [math]::Round((Get-Item $zipPath).Length/1MB, 2)
-          Write-Host "✅ app.zip: ${size} MB"
+          Write-Host "app.zip: ${size} MB"
           Write-Host "Contents:"
-          [System.IO.Compression.ZipFile]::OpenRead($zipPath).Entries | Select-Object Name | Format-Table
+          [System.IO.Compression.ZipFile]::OpenRead($zipPath).Entries |
+            Select-Object Name | Format-Table
 
       - name: Deploy to Azure
         uses: azure/webapps-deploy@v3
@@ -82,6 +71,6 @@ jobs:
             $r = Invoke-WebRequest "https://v2-hht-api.azurewebsites.net/api/hht/health" -UseBasicParsing -TimeoutSec 30
             Write-Host "✅ LIVE: $($r.Content)"
           } catch {
-            Write-Host "⚠️  Pending SAP connection (normal until HCM installed): $_"
+            Write-Host "⚠️  Pending (HCM may not be connected yet): $_"
           }
           exit 0

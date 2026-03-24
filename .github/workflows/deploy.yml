@@ -36,9 +36,15 @@ jobs:
             /m /v:minimal
 
           Write-Host "Published files:"
-          Get-ChildItem "${{ github.workspace }}\publish_output" -Recurse | Select-Object FullName | Format-Table
+          Get-ChildItem "${{ github.workspace }}\publish_output" -Recurse -File | Select-Object FullName | Format-Table
           Write-Host "bin DLLs:"
-          Get-ChildItem "${{ github.workspace }}\publish_output\bin\*.dll" | Select-Object Name | Format-Table
+          $binPath = "${{ github.workspace }}\publish_output\bin"
+          if (Test-Path $binPath) {
+            Get-ChildItem "$binPath\*.dll" | Select-Object Name | Format-Table
+          } else {
+            Write-Host "No bin subfolder - DLLs are in publish root"
+            Get-ChildItem "${{ github.workspace }}\publish_output\*.dll" | Select-Object Name | Format-Table
+          }
 
       - name: Package for Azure (plain zip)
         shell: powershell

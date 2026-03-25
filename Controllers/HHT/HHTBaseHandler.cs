@@ -55,7 +55,12 @@ namespace V2HHTMiddleware.Controllers.HHT
                 // Register Prod destination
                 var prodProps = new RfcConfigParameters();
                 prodProps.Add(RfcConfigParameters.Name,          "HHT_PROD");
-                prodProps.Add(RfcConfigParameters.AppServerHost,  Cfg("SAP_HOST",    "192.168.144.170"));
+                var sapHost = Cfg("SAP_HOST", "auto");
+                if (sapHost == "auto" || string.IsNullOrEmpty(sapHost))
+                {
+                    sapHost = DiscoverHCProxyIP(3302) ?? "127.0.0.1";
+                }
+                prodProps.Add(RfcConfigParameters.AppServerHost, sapHost);
                 prodProps.Add(RfcConfigParameters.Client,         Cfg("SAP_CLIENT",  "600"));
                 prodProps.Add(RfcConfigParameters.SystemNumber,   Cfg("SAP_SYSNUM",  "02"));
                 prodProps.Add(RfcConfigParameters.SystemID,       Cfg("SAP_SYSID",   "PRD"));
@@ -122,5 +127,33 @@ namespace V2HHTMiddleware.Controllers.HHT
         /// <summary>Standard EAN_DATA table — appears in almost every store opcode.</summary>
         protected static string EanData(IRfcTable t)
             => Tbl(t, "MANDT", "MATNR", "EAN11", "UMREZ", "EANNR");
+
+        /// <summary>
+        /// Discovers the Azure Hybrid Connection local proxy IP by scanning 127.0.0.x range.
+        /// HC creates a loopback alias that forwards to the on-prem endpoint.
+        /// </summary>
+        private static string DiscoverHCProxyIP(int port)
+        {
+            for (int i = 1; i <= 254; i++)
+            {
+                string ip = $"127.0.0.{i}";
+                try
+                {
+                    using (var client = new System.Net.Sockets.TcpClient())
+                    {
+                        var result = client.BeginConnect(ip, port, null, null);
+                        bool success = result.AsyncWaitHandle.WaitOne(100);
+                        if (success && client.Connected)
+                        {
+                            client.EndConnect(result);
+                            return ip;
+                        }
+                        try { client.EndConnect(result); } catch { }
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
     }
 }

@@ -1,0 +1,29 @@
+name: Setup portproxy on Server 200
+on:
+  workflow_dispatch:
+jobs:
+  setup:
+    runs-on: iis
+    steps:
+      - name: Configure netsh portproxy on 200
+        shell: powershell
+        run: |
+          $pass = ConvertTo-SecureString 'vrl@55555' -AsPlainText -Force
+          $cred = New-Object PSCredential('Administrator', $pass)
+          $so = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
+          $s = New-PSSession -ComputerName 192.168.144.200 -Credential $cred -SessionOption $so
+          Invoke-Command -Session $s -ScriptBlock {
+            # Remove old listener
+            netsh interface portproxy delete v4tov4 listenport=3302 listenaddress=0.0.0.0 2>$null
+            # Forward 200:3302 → 185:3302 (SAP's own gateway)
+            netsh interface portproxy add v4tov4 listenport=3302 listenaddress=0.0.0.0 connectport=3302 connectaddress=192.168.144.185
+            # Firewall
+            netsh advfirewall firewall delete rule name=SAP_GW_3302 2>$null
+            netsh advfirewall firewall add rule name=SAP_GW_3302 dir=in action=allow protocol=TCP localport=3302
+            # Verify
+            Write-Host "=== portproxy ==="
+            netsh interface portproxy show v4tov4
+            Write-Host "=== port 3302 listener ==="
+            netstat -an | findstr ":3302"
+          }
+          Remove-PSSession $s

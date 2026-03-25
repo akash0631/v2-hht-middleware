@@ -11,7 +11,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Http;
-using System.Web.Script.Serialization;
+using Newtonsoft.Json;
+
 
 namespace V2HHTMiddleware.Controllers.HHT
 {
@@ -385,8 +386,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 if (!File.Exists(STATS_FILE)) { _statsLoaded = false; return; }
                 var json = File.ReadAllText(STATS_FILE);
-                var ser  = new JavaScriptSerializer();
-                var dict = ser.Deserialize<Dictionary<string, PersistedStats>>(json);
+                var dict = JsonConvert.DeserializeObject<Dictionary<string, PersistedStats>>(json);
                 if (dict == null) { _statsLoaded = false; return; }
                 foreach (var kv in dict)
                 {
@@ -429,8 +429,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                     };
                 }
 
-                var ser  = new JavaScriptSerializer();
-                var json = ser.Serialize(dict);
+                var json = JsonConvert.SerializeObject(dict);
                 lock (_fileLock)
                 {
                     File.WriteAllText(STATS_FILE + ".tmp", json);

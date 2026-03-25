@@ -132,28 +132,48 @@ namespace V2HHTMiddleware.Controllers.HHT
         /// Discovers the Azure Hybrid Connection local proxy IP by scanning 127.0.0.x range.
         /// HC creates a loopback alias that forwards to the on-prem endpoint.
         /// </summary>
+        private static string _cachedHCProxyIP = null;
+
         private static string DiscoverHCProxyIP(int port)
         {
+            if (_cachedHCProxyIP != null) return _cachedHCProxyIP;
+
+            // Azure HC assigns loopback alias in range 127.0.0.x
+            // Scan in parallel with short timeout
+            var found = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var tasks = new System.Collections.Generic.List<System.Threading.Tasks.Task>();
+
             for (int i = 1; i <= 254; i++)
             {
-                string ip = $"127.0.0.{i}";
-                try
+                int idx = i;
+                tasks.Add(System.Threading.Tasks.Task.Run(() =>
                 {
-                    using (var client = new System.Net.Sockets.TcpClient())
+                    string ip = $"127.0.0.{idx}";
+                    try
                     {
-                        var result = client.BeginConnect(ip, port, null, null);
-                        bool success = result.AsyncWaitHandle.WaitOne(100);
-                        if (success && client.Connected)
+                        using (var sock = new System.Net.Sockets.Socket(
+                            System.Net.Sockets.AddressFamily.InterNetwork,
+                            System.Net.Sockets.SocketType.Stream,
+                            System.Net.Sockets.ProtocolType.Tcp))
                         {
-                            client.EndConnect(result);
-                            return ip;
+                            sock.Blocking = false;
+                            try { sock.Connect(ip, port); } catch { }
+                            var write = new System.Collections.Generic.List<System.Net.Sockets.Socket> { sock };
+                            var error = new System.Collections.Generic.List<System.Net.Sockets.Socket> { sock };
+                            System.Net.Sockets.Socket.Select(null, write, error, 150000);
+                            if (write.Count > 0 && error.Count == 0)
+                            {
+                                found.Add(ip);
+                            }
                         }
-                        try { client.EndConnect(result); } catch { }
                     }
-                }
-                catch { }
+                    catch { }
+                }));
             }
-            return null;
+
+            System.Threading.Tasks.Task.WaitAll(tasks.ToArray(), 3000);
+            _cachedHCProxyIP = found.FirstOrDefault();
+            return _cachedHCProxyIP;
         }
     }
 }

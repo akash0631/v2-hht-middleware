@@ -42,38 +42,40 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpGet, Route("health")]
         public HttpResponseMessage Health()
         {
-            int count = HHTRouter.AllOpcodes().Count();
-            return Txt($"OK|v2-hht-middleware|opcodes={count}|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC");
+            string proxyIp = JavaMWProxy.DiscoverIP() ?? "not-found";
+            return Txt($"OK|v2-hht-proxy|java-mw={proxyIp}:9080|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC");
         }
 
-        private async Task<HttpResponseMessage> ProcessRequest()
+        // ── Proxy all HHT requests to Java middleware on Server 200 via HC tunnel ──
+        private static async Task<HttpResponseMessage> ProcessRequest()
         {
             try
             {
-                string raw = (await Request.Content.ReadAsStringAsync() ?? "").Trim();
-                if (string.IsNullOrEmpty(raw))
-                    return Txt("E#Empty request");
+                string proxyIp = JavaMWProxy.DiscoverIP();
+                if (proxyIp == null)
+                    return Txt("E#Java middleware not reachable via HC tunnel");
 
-                int sep   = raw.IndexOf('#');
-                string op = (sep > 0 ? raw.Substring(0, sep) : raw).ToLower().Trim();
+                string raw = "";
+                // Get request body from current HttpContext since ApiController.Request
+                // may not be available in static context
+                var ctx = System.Web.HttpContext.Current;
+                if (ctx?.Request != null)
+                {
+                    using (var sr = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8))
+                        raw = await Task.Run(() => sr.ReadToEnd());
+                }
 
-                if (string.IsNullOrEmpty(op))
-                    return Txt("E#Missing opcode");
+                string targetUrl = $"http://{proxyIp}:9080/xmwgw/ValueXMW";
 
-                bool useQa = Request.Headers.Contains("X-HHT-Env") &&
-                             string.Join("", Request.Headers.GetValues("X-HHT-Env"))
-                                   .Equals("QA", StringComparison.OrdinalIgnoreCase);
-
-                var handler = HHTRouter.Resolve(op, useQa);
-                if (handler == null)
-                    return Txt($"E#Unknown opcode: {op}");
-
-                handler.SetRequest(raw);
-                string response = await Task.Run(() => handler.Execute())
-                                            .TimeoutAfter(TimeSpan.FromSeconds(60));
-                return Txt(response);
+                using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) })
+                {
+                    var content = new StringContent(raw, Encoding.UTF8, "text/plain");
+                    var resp = await client.PostAsync(targetUrl, content);
+                    string body = await resp.Content.ReadAsStringAsync();
+                    return Txt(body);
+                }
             }
-            catch (TimeoutException)
+            catch (TaskCanceledException)
             {
                 return Txt("E#Request timed out. SAP may be busy. Please retry.");
             }

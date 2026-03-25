@@ -10,16 +10,18 @@ namespace V2HHTMiddleware.Controllers.HHT
     [RoutePrefix("api/hht")]
     public class HHTController : ApiController
     {
-        // ── Singleton HttpClient — shared across all requests & instances ──────
-        // HttpClient is thread-safe and designed to be reused.
-        // Single instance = connection pooling, no socket exhaustion.
+        // ── APK metadata served directly by Azure — no dependency on Server 200 ──
+        private const string APK_VERSION       = "12.098";
+        private const string APK_DOWNLOAD_URL  = "https://assets.eatnubo.com/hht/V2_HHT_Azure_Release.apk";
+        private const string MIDDLEWARE_VERSION = "v2-hht-azure-proxy|3.0";
+
+        // ── Singleton HttpClient ──────────────────────────────────────────────
         private static readonly HttpClient _http;
         private static volatile string _javaBase = null;
         private static readonly object _discoveryLock = new object();
 
         static HHTController()
         {
-            // Allow up to 300 concurrent connections (1000 devices, ~3 connections each)
             var handler = new HttpClientHandler
             {
                 MaxConnectionsPerServer = 300,
@@ -32,7 +34,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             };
         }
 
-        // ── Discover HC proxy IP for port 9080 ──────────────────────────────
+        // ── HC proxy discovery ────────────────────────────────────────────────
         private static string GetJavaBase()
         {
             if (_javaBase != null) return _javaBase;
@@ -68,47 +70,45 @@ namespace V2HHTMiddleware.Controllers.HHT
                 }
 
                 Task.WaitAll(tasks.ToArray(), 4000);
-
-                // Pick lowest index for determinism
                 int best = int.MaxValue;
                 foreach (var x in found) if (x < best) best = x;
-
-                _javaBase = best < int.MaxValue
-                    ? $"http://127.0.0.{best}:9080/xmwgw"
-                    : null;
-
+                _javaBase = best < int.MaxValue ? $"http://127.0.0.{best}:9080/xmwgw" : null;
                 return _javaBase;
             }
         }
 
-        // ── Legacy URL formats the Android app uses ─────────────────────────
-        [HttpPost, Route("ValueXMW")]
-        public Task<HttpResponseMessage> LegacyValueXMW() => Proxy();
-
-        [HttpPost, Route("ValueXMW/{app}")]
-        public Task<HttpResponseMessage> LegacyValueXMWApp(string app) => Proxy();
-
-        [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
-        public Task<HttpResponseMessage> LegacyFull(string app, string platform, string version) => Proxy();
-
-        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
-        public Task<HttpResponseMessage> LegacyRoot(string app, string platform, string version) => Proxy();
-
+        // ── Main opcode endpoint — all legacy URL patterns ────────────────────
         [HttpPost, Route("")]
         public Task<HttpResponseMessage> Handle() => Proxy();
 
-        // ── Version check — Android app calls this on startup ───────────────
+        [HttpPost, Route("ValueXMW")]
+        public Task<HttpResponseMessage> ValueXMW() => Proxy();
+
+        [HttpPost, Route("ValueXMW/{app}")]
+        public Task<HttpResponseMessage> ValueXMWApp(string app) => Proxy();
+
+        [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
+        public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
+
+        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
+        public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
+
+        // ── App version — served directly by Azure, no Java dependency ────────
+        // Android calls this on startup to check for APK updates.
+        // Returns current v12.098 with CDN download link.
         [HttpGet, Route("appversion")]
-        public Task<HttpResponseMessage> AppVersion() => ProxyGet("appversion?appName=V2RetailOps&platform=Android&majorVersion=11&minorVersion=83");
+        public HttpResponseMessage AppVersion()
+            => Json($"{{\"upgrade\":\"force\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_DOWNLOAD_URL}\"}}");
 
         [HttpGet, Route("ValueXMW/appversion")]
-        public Task<HttpResponseMessage> AppVersionLegacy() => ProxyGet("appversion?appName=V2RetailOps&platform=Android&majorVersion=11&minorVersion=83");
+        public HttpResponseMessage AppVersionLegacy()
+            => Json($"{{\"upgrade\":\"force\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_DOWNLOAD_URL}\"}}");
 
-        // ── Health — shows Azure + Java status ──────────────────────────────
+        // ── Health — full pipeline status ─────────────────────────────────────
         [HttpGet, Route("health")]
         public async Task<HttpResponseMessage> Health()
         {
-            string javaBase = GetJavaBase();
+            string javaBase   = GetJavaBase();
             string javaStatus = "unreachable";
 
             if (javaBase != null)
@@ -121,32 +121,32 @@ namespace V2HHTMiddleware.Controllers.HHT
                 }
                 catch (Exception ex)
                 {
-                    javaStatus = "err:" + ex.Message.Replace("\n", " ").Substring(0, Math.Min(50, ex.Message.Length));
+                    javaStatus = "err:" + ex.Message.Substring(0, Math.Min(60, ex.Message.Length)).Replace("\n", " ");
                 }
             }
 
-            string body = $"OK|v2-hht-azure-proxy|java={javaBase ?? "not-discovered"}|java-status={javaStatus}|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC";
+            string body = $"OK|{MIDDLEWARE_VERSION}" +
+                          $"|apk={APK_VERSION}" +
+                          $"|java={javaBase ?? "not-discovered"}" +
+                          $"|java={javaStatus}" +
+                          $"|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC";
+
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(body, System.Text.Encoding.UTF8, "text/plain")
             };
         }
 
-        // ── Core proxy logic ─────────────────────────────────────────────────
+        // ── Proxy core ────────────────────────────────────────────────────────
         private async Task<HttpResponseMessage> Proxy()
         {
             string javaBase = GetJavaBase();
             if (javaBase == null)
-            {
-                return Txt("E#Java middleware not reachable — HC tunnel down");
-            }
+                return Txt("E#Azure middleware cannot reach Server 200 — HC tunnel down");
 
             try
             {
-                // Read raw POST body
-                string body = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-                // Build target URL: preserve /ValueXMW path that Java expects
+                string body   = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
                 string target = javaBase + "/ValueXMW";
 
                 var req = new HttpRequestMessage(HttpMethod.Post, target)
@@ -154,24 +154,22 @@ namespace V2HHTMiddleware.Controllers.HHT
                     Content = new StringContent(body, System.Text.Encoding.UTF8, "text/plain")
                 };
 
-                // Forward device-identifying headers if present
+                // Forward device headers
                 foreach (var h in Request.Headers)
-                {
                     if (h.Key.StartsWith("X-HHT-", StringComparison.OrdinalIgnoreCase))
                         req.Headers.TryAddWithoutValidation(h.Key, h.Value);
-                }
 
-                var resp = await _http.SendAsync(req).ConfigureAwait(false);
-                string respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var resp     = await _http.SendAsync(req).ConfigureAwait(false);
+                string rBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
 
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent(respBody, System.Text.Encoding.UTF8, "text/plain")
+                    Content = new StringContent(rBody, System.Text.Encoding.UTF8, "text/plain")
                 };
             }
             catch (TaskCanceledException)
             {
-                return Txt("E#Request timeout — SAP took too long");
+                return Txt("E#Timeout — SAP did not respond in time");
             }
             catch (Exception ex)
             {
@@ -179,26 +177,17 @@ namespace V2HHTMiddleware.Controllers.HHT
             }
         }
 
-        private async Task<HttpResponseMessage> ProxyGet(string path)
-        {
-            string javaBase = GetJavaBase();
-            if (javaBase == null) return Txt("E#not-discovered");
-            try
-            {
-                var resp = await _http.GetAsync($"{javaBase}/{path}").ConfigureAwait(false);
-                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                return new HttpResponseMessage(HttpStatusCode.OK)
-                {
-                    Content = new StringContent(body, System.Text.Encoding.UTF8, "text/plain")
-                };
-            }
-            catch { return Txt("E#proxy-error"); }
-        }
-
+        // ── Helpers ───────────────────────────────────────────────────────────
         private static HttpResponseMessage Txt(string s) =>
             new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(s, System.Text.Encoding.UTF8, "text/plain")
+            };
+
+        private static HttpResponseMessage Json(string s) =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(s, System.Text.Encoding.UTF8, "application/json")
             };
     }
 }

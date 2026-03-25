@@ -35,17 +35,9 @@ namespace V2HHTMiddleware.Controllers.HHT
         public abstract string Execute();
 
         // ── SAP connection pool ───────────────────────────────────────────────
-        // Destinations are registered once at startup and reused for all requests.
-        // NCo pool handles thread safety and connection reuse internally.
-
         private static readonly object _initLock = new object();
         private static bool _initialized = false;
 
-        /// <summary>
-        /// Register SAP destinations with NCo connection pool.
-        /// Called once at application startup.
-        /// Settings read from Azure App Settings (override Web.config defaults).
-        /// </summary>
         public static void InitializeSapPool()
         {
             if (_initialized) return;
@@ -53,40 +45,42 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 if (_initialized) return;
 
-                // Register Prod destination
-                var prodProps = new RfcConfigParameters();
-                prodProps.Add(RfcConfigParameters.Name,          "HHT_PROD");
                 var sapHost = Cfg("SAP_HOST", "auto");
                 if (sapHost == "auto" || string.IsNullOrEmpty(sapHost))
                 {
                     sapHost = DiscoverHCProxyIP(3302) ?? "127.0.0.1";
                 }
+
+                // ── PROD destination ──────────────────────────────────────────
+                // Client-only connection: AppServerHost + SystemNumber + credentials.
+                // DO NOT set GatewayHost/GatewayService on a client destination —
+                // those params trigger SAP's REMOTE_GATEWAY handshake (SAP tries to
+                // call back to the caller's gateway), which causes WSAECONNRESET
+                // across the Hybrid Connection tunnel.
+                var prodProps = new RfcConfigParameters();
+                prodProps.Add(RfcConfigParameters.Name,          "HHT_PROD");
                 prodProps.Add(RfcConfigParameters.AppServerHost, sapHost);
                 prodProps.Add(RfcConfigParameters.Client,         Cfg("SAP_CLIENT",  "600"));
                 prodProps.Add(RfcConfigParameters.SystemNumber,   Cfg("SAP_SYSNUM",  "02"));
-                // SystemID removed - prevents SAP remote gateway callback to caller
-                prodProps.Add(RfcConfigParameters.User,           Cfg("SAP_USER",    "PIUSER"));
+                prodProps.Add(RfcConfigParameters.User,           Cfg("SAP_USER",    "BATCHUSER"));
                 prodProps.Add(RfcConfigParameters.Password,       Cfg("SAP_PASS",    ""));
                 prodProps.Add(RfcConfigParameters.Language,       "EN");
-                // Point gateway back to same host to avoid remote GW handshake
-                prodProps.Add(RfcConfigParameters.GatewayHost,   sapHost);
-                prodProps.Add(RfcConfigParameters.GatewayService,"sapgw02");
                 prodProps.Add(RfcConfigParameters.PoolSize,       Cfg("SAP_POOL_SIZE",  "50"));
                 prodProps.Add(RfcConfigParameters.MaxPoolSize,    Cfg("SAP_PEAK_LIMIT", "300"));
 
-                // Register QA destination (for testing with X-HHT-Env: QA header)
+                // ── QA destination ────────────────────────────────────────────
                 var qaProps = new RfcConfigParameters();
                 qaProps.Add(RfcConfigParameters.Name,          "HHT_QA");
                 qaProps.Add(RfcConfigParameters.AppServerHost,  Cfg("SAP_QA_HOST",   "192.168.144.179"));
                 qaProps.Add(RfcConfigParameters.Client,         Cfg("SAP_QA_CLIENT", "600"));
                 qaProps.Add(RfcConfigParameters.SystemNumber,   Cfg("SAP_QA_SYSNUM", "00"));
-                qaProps.Add(RfcConfigParameters.User,           Cfg("SAP_QA_USER",   "PIUSER"));
+                qaProps.Add(RfcConfigParameters.User,           Cfg("SAP_QA_USER",   "BATCHUSER"));
                 qaProps.Add(RfcConfigParameters.Password,       Cfg("SAP_QA_PASS",   ""));
                 qaProps.Add(RfcConfigParameters.Language,       "EN");
                 qaProps.Add(RfcConfigParameters.PoolSize,       "5");
                 qaProps.Add(RfcConfigParameters.MaxPoolSize,    "20");
 
-                // Warm the pool — pre-creates connections so first device request isn't slow
+                // Warm pool — absorbs latency from first device request
                 try { RfcDestinationManager.GetDestination(prodProps); } catch { }
                 try { RfcDestinationManager.GetDestination(qaProps);  } catch { }
 
@@ -117,7 +111,6 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         // ── Table serialisers ─────────────────────────────────────────────────
 
-        /// <summary>Serialize an IRfcTable to "#"-delimited string. Each row: field1#field2#...</summary>
         protected static string Tbl(IRfcTable t, params string[] fields)
         {
             if (t == null || t.RowCount == 0) return "";
@@ -128,56 +121,59 @@ namespace V2HHTMiddleware.Controllers.HHT
             return sb.ToString();
         }
 
-        /// <summary>Standard EAN_DATA table — appears in almost every store opcode.</summary>
         protected static string EanData(IRfcTable t)
             => Tbl(t, "MANDT", "MATNR", "EAN11", "UMREZ", "EANNR");
 
-        /// <summary>
-        /// Discovers the Azure Hybrid Connection local proxy IP by scanning 127.0.0.x range.
-        /// HC creates a loopback alias that forwards to the on-prem endpoint.
-        /// </summary>
-        private static string _cachedHCProxyIP = null;
+        // ── HC proxy discovery ────────────────────────────────────────────────
+        // Azure Hybrid Connection creates a loopback alias (127.0.0.x) that forwards
+        // to the on-prem endpoint. We scan to find it since the IP is not fixed.
+        // Result is cached for the lifetime of the App Service instance.
+
+        private static volatile string _cachedHCProxyIP = null;
+        private static readonly object _cacheLock = new object();
 
         private static string DiscoverHCProxyIP(int port)
         {
             if (_cachedHCProxyIP != null) return _cachedHCProxyIP;
-
-            // Azure HC assigns loopback alias in range 127.0.0.x
-            // Scan in parallel with short timeout
-            var found = new System.Collections.Concurrent.ConcurrentBag<string>();
-            var tasks = new System.Collections.Generic.List<System.Threading.Tasks.Task>();
-
-            for (int i = 1; i <= 254; i++)
+            lock (_cacheLock)
             {
-                int idx = i;
-                tasks.Add(System.Threading.Tasks.Task.Run(() =>
+                if (_cachedHCProxyIP != null) return _cachedHCProxyIP;
+
+                var found = new System.Collections.Concurrent.ConcurrentBag<int>();
+                var tasks = new System.Collections.Generic.List<System.Threading.Tasks.Task>();
+
+                for (int i = 1; i <= 254; i++)
                 {
-                    string ip = $"127.0.0.{idx}";
-                    try
+                    int idx = i;
+                    tasks.Add(System.Threading.Tasks.Task.Run(() =>
                     {
-                        using (var sock = new System.Net.Sockets.Socket(
-                            System.Net.Sockets.AddressFamily.InterNetwork,
-                            System.Net.Sockets.SocketType.Stream,
-                            System.Net.Sockets.ProtocolType.Tcp))
+                        string ip = $"127.0.0.{idx}";
+                        try
                         {
-                            sock.Blocking = false;
-                            try { sock.Connect(ip, port); } catch { }
-                            var write = new System.Collections.Generic.List<System.Net.Sockets.Socket> { sock };
-                            var error = new System.Collections.Generic.List<System.Net.Sockets.Socket> { sock };
-                            System.Net.Sockets.Socket.Select(null, write, error, 150000);
-                            if (write.Count > 0 && error.Count == 0)
+                            using (var sock = new System.Net.Sockets.Socket(
+                                System.Net.Sockets.AddressFamily.InterNetwork,
+                                System.Net.Sockets.SocketType.Stream,
+                                System.Net.Sockets.ProtocolType.Tcp))
                             {
-                                found.Add(ip);
+                                sock.Blocking = false;
+                                try { sock.Connect(ip, port); } catch { }
+                                var write = new System.Collections.Generic.List<System.Net.Sockets.Socket> { sock };
+                                var error = new System.Collections.Generic.List<System.Net.Sockets.Socket> { sock };
+                                System.Net.Sockets.Socket.Select(null, write, error, 150000);
+                                if (write.Count > 0 && error.Count == 0)
+                                    found.Add(idx);
                             }
                         }
-                    }
-                    catch { }
-                }));
-            }
+                        catch { }
+                    }));
+                }
 
-            System.Threading.Tasks.Task.WaitAll(tasks.ToArray(), 3000);
-            _cachedHCProxyIP = found.FirstOrDefault();
-            return _cachedHCProxyIP;
+                System.Threading.Tasks.Task.WaitAll(tasks.ToArray(), 3000);
+                // Take lowest index for determinism (HC typically uses a stable alias)
+                int best = found.OrderBy(x => x).FirstOrDefault();
+                _cachedHCProxyIP = best > 0 ? $"127.0.0.{best}" : null;
+                return _cachedHCProxyIP;
+            }
         }
     }
 }

@@ -99,8 +99,10 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         // ── Version check — Android app calls this on startup ───────────────
         [HttpGet, Route("appversion")]
-        [HttpGet, Route("ValueXMW/appversion")]
         public Task<HttpResponseMessage> AppVersion() => ProxyGet("appversion?appName=V2RetailOps&platform=Android&majorVersion=11&minorVersion=83");
+
+        [HttpGet, Route("ValueXMW/appversion")]
+        public Task<HttpResponseMessage> AppVersionLegacy() => ProxyGet("appversion?appName=V2RetailOps&platform=Android&majorVersion=11&minorVersion=83");
 
         // ── Health — shows Azure + Java status ──────────────────────────────
         [HttpGet, Route("health")]

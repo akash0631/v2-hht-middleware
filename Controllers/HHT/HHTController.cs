@@ -11,48 +11,34 @@ namespace V2HHTMiddleware.Controllers.HHT
     [RoutePrefix("api/hht")]
     public class HHTController : ApiController
     {
-        // ── Main endpoint ──────────────────────────────────────────────────────
         [HttpPost, Route("")]
         public async Task<HttpResponseMessage> Handle()
-        {
-            return await ProcessRequest();
-        }
+            => await ProcessRequest();
 
-        // ── Legacy alias: POST /api/hht/ValueXMW (APK sends here) ─────────────
         [HttpPost, Route("ValueXMW")]
         public async Task<HttpResponseMessage> LegacyValueXMW()
-        {
-            return await ProcessRequest();
-        }
+            => await ProcessRequest();
 
-        // ── Legacy alias with segments (old xmwgw URL format) ─────────────────
         [HttpPost, Route("ValueXMW/{app}")]
         public async Task<HttpResponseMessage> LegacyValueXMWApp(string app)
-        {
-            return await ProcessRequest();
-        }
+            => await ProcessRequest();
 
         [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
         public async Task<HttpResponseMessage> LegacyFull(string app, string platform, string version)
-        {
-            return await ProcessRequest();
-        }
+            => await ProcessRequest();
 
-        // ── Old root-level legacy (kept for safety) ───────────────────────────
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> LegacyRoot(string app, string platform, string version)
             => ProcessRequest();
 
-        // ── App version check — APK calls this on startup ─────────────────────
         [HttpGet, Route("appversion")]
-        [HttpGet, Route("ValueXMW/appversion")]
         public HttpResponseMessage AppVersion()
-        {
-            // Return format the APK expects — tells it no update needed
-            return Txt("1|11|83|" + DateTime.UtcNow.ToString("yyyy-MM-dd"));
-        }
+            => Txt("1|11|83|" + DateTime.UtcNow.ToString("yyyy-MM-dd"));
 
-        // ── Health check ───────────────────────────────────────────────────────
+        [HttpGet, Route("ValueXMW/appversion")]
+        public HttpResponseMessage AppVersionLegacy()
+            => Txt("1|11|83|" + DateTime.UtcNow.ToString("yyyy-MM-dd"));
+
         [HttpGet, Route("health")]
         public HttpResponseMessage Health()
         {
@@ -60,7 +46,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             return Txt($"OK|v2-hht-middleware|opcodes={count}|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC");
         }
 
-        // ── Core processing logic ──────────────────────────────────────────────
         private async Task<HttpResponseMessage> ProcessRequest()
         {
             try

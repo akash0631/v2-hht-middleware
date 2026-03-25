@@ -8,19 +8,6 @@ using System.Web.Http;
 
 namespace V2HHTMiddleware.Controllers.HHT
 {
-    /// <summary>
-    /// Single entry point for ALL Android HHT device requests.
-    ///
-    /// NEW URL:    POST https://v2-hht-api.azurewebsites.net/api/hht
-    /// LEGACY URL: POST https://v2-hht-api.azurewebsites.net/ValueXMW/{app}/{platform}/{version}
-    ///
-    /// Android app migration = change base URL only. Zero protocol changes.
-    ///
-    /// Request body:  opcode#param1#param2#...   (UTF-8 plain text)
-    /// Optional header:  X-HHT-Env: QA   → route to QA SAP instead of Prod (testing only)
-    ///
-    /// Response:  S#...  (success)  or  E#...  (error)  — same as old xmwgw
-    /// </summary>
     [RoutePrefix("api/hht")]
     public class HHTController : ApiController
     {
@@ -28,10 +15,57 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpPost, Route("")]
         public async Task<HttpResponseMessage> Handle()
         {
-            string raw = "";
+            return await ProcessRequest();
+        }
+
+        // ── Legacy alias: POST /api/hht/ValueXMW (APK sends here) ─────────────
+        [HttpPost, Route("ValueXMW")]
+        public async Task<HttpResponseMessage> LegacyValueXMW()
+        {
+            return await ProcessRequest();
+        }
+
+        // ── Legacy alias with segments (old xmwgw URL format) ─────────────────
+        [HttpPost, Route("ValueXMW/{app}")]
+        public async Task<HttpResponseMessage> LegacyValueXMWApp(string app)
+        {
+            return await ProcessRequest();
+        }
+
+        [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
+        public async Task<HttpResponseMessage> LegacyFull(string app, string platform, string version)
+        {
+            return await ProcessRequest();
+        }
+
+        // ── Old root-level legacy (kept for safety) ───────────────────────────
+        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
+        public Task<HttpResponseMessage> LegacyRoot(string app, string platform, string version)
+            => ProcessRequest();
+
+        // ── App version check — APK calls this on startup ─────────────────────
+        [HttpGet, Route("appversion")]
+        [HttpGet, Route("ValueXMW/appversion")]
+        public HttpResponseMessage AppVersion()
+        {
+            // Return format the APK expects — tells it no update needed
+            return Txt("1|11|83|" + DateTime.UtcNow.ToString("yyyy-MM-dd"));
+        }
+
+        // ── Health check ───────────────────────────────────────────────────────
+        [HttpGet, Route("health")]
+        public HttpResponseMessage Health()
+        {
+            int count = HHTRouter.AllOpcodes().Count();
+            return Txt($"OK|v2-hht-middleware|opcodes={count}|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC");
+        }
+
+        // ── Core processing logic ──────────────────────────────────────────────
+        private async Task<HttpResponseMessage> ProcessRequest()
+        {
             try
             {
-                raw = (await Request.Content.ReadAsStringAsync() ?? "").Trim();
+                string raw = (await Request.Content.ReadAsStringAsync() ?? "").Trim();
                 if (string.IsNullOrEmpty(raw))
                     return Txt("E#Empty request");
 
@@ -41,9 +75,9 @@ namespace V2HHTMiddleware.Controllers.HHT
                 if (string.IsNullOrEmpty(op))
                     return Txt("E#Missing opcode");
 
-                // Optional: route to QA SAP for testing
                 bool useQa = Request.Headers.Contains("X-HHT-Env") &&
-                             string.Join("", Request.Headers.GetValues("X-HHT-Env")).Equals("QA", StringComparison.OrdinalIgnoreCase);
+                             string.Join("", Request.Headers.GetValues("X-HHT-Env"))
+                                   .Equals("QA", StringComparison.OrdinalIgnoreCase);
 
                 var handler = HHTRouter.Resolve(op, useQa);
                 if (handler == null)
@@ -64,20 +98,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             }
         }
 
-        // ── Health check ───────────────────────────────────────────────────────
-        [HttpGet, Route("health")]
-        public HttpResponseMessage Health()
-        {
-            int count = HHTRouter.AllOpcodes().Count();
-            return Txt($"OK|v2-hht-middleware|opcodes={count}|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC");
-        }
-
-        // ── Legacy URL — old Android apps keep working during cutover ──────────
-        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
-        public Task<HttpResponseMessage> Legacy(string app, string platform, string version)
-            => Handle();
-
-        // ─────────────────────────────────────────────────────────────────────
         private static HttpResponseMessage Txt(string body)
         {
             var r = new HttpResponseMessage(HttpStatusCode.OK);

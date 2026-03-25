@@ -63,7 +63,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 prodProps.Add(RfcConfigParameters.AppServerHost, sapHost);
                 prodProps.Add(RfcConfigParameters.Client,         Cfg("SAP_CLIENT",  "600"));
                 prodProps.Add(RfcConfigParameters.SystemNumber,   Cfg("SAP_SYSNUM",  "02"));
-                prodProps.Add(RfcConfigParameters.SystemID,       Cfg("SAP_SYSID",   "PRD"));
+                // SystemID removed - prevents SAP remote gateway callback to caller
                 prodProps.Add(RfcConfigParameters.User,           Cfg("SAP_USER",    "PIUSER"));
                 prodProps.Add(RfcConfigParameters.Password,       Cfg("SAP_PASS",    ""));
                 prodProps.Add(RfcConfigParameters.Language,       "EN");

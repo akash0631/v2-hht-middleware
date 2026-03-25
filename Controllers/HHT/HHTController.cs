@@ -391,7 +391,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 foreach (var kv in dict)
                 {
                     var p = kv.Value;
-                    var s = new OpcodeStats(p.MinMs, true, null);
+                    var s = new OpcodeStats((long)p.MinMs, true, null);
                     s.RestoreFrom(p);
                     _opcodeStats[kv.Key] = s;
                 }

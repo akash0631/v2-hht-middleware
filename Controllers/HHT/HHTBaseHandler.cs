@@ -68,6 +68,9 @@ namespace V2HHTMiddleware.Controllers.HHT
                 prodProps.Add(RfcConfigParameters.User,           Cfg("SAP_USER",    "PIUSER"));
                 prodProps.Add(RfcConfigParameters.Password,       Cfg("SAP_PASS",    ""));
                 prodProps.Add(RfcConfigParameters.Language,       "EN");
+                // Point gateway back to same host to avoid remote GW handshake
+                prodProps.Add(RfcConfigParameters.GatewayHost,   sapHost);
+                prodProps.Add(RfcConfigParameters.GatewayService,"sapgw02");
                 prodProps.Add(RfcConfigParameters.PoolSize,       Cfg("SAP_POOL_SIZE",  "50"));
                 prodProps.Add(RfcConfigParameters.MaxPoolSize,    Cfg("SAP_PEAK_LIMIT", "300"));
 

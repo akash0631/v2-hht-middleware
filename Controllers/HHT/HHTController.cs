@@ -408,10 +408,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 return LogAndReturn(null, (int)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
 
-            RecordCall(opcode, (int)sw.ElapsedMilliseconds, sapOk);
-            var response = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            response.Content = new StringContent(respBody ?? "Response:null", Encoding.UTF8, "application/json");
-            return response;
+            return LogAndReturn(respBody, (int)sw.ElapsedMilliseconds, null, sapOk, opcode);
         }
 
         // ═══════════════════════════════════════════════════════════════════════

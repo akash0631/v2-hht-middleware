@@ -672,9 +672,22 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             if (bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase))
             {
-                // Login: Response:1#WERKS#GROUP#<eol>
-                obj["EX_WERKS"] = parts.Length > 1 ? parts[1].Trim() : "";
-                obj["EX_GROUP"] = parts.Length > 2 ? parts[2].Trim() : "";
+                // Java returns: Response:1#WERKS  (no GROUP field)
+                // Derive EX_GROUP from WERKS — same logic v11.83 app used:
+                //   DH24, DH26 = DC/Warehouse users
+                //   DH25       = Ecomm users
+                //   Stores     = everything else (HD**, V0**, etc.)
+                string werks = parts.Length > 1 ? parts[1].Trim() : "";
+                string group;
+                if (werks.Equals("DH24", StringComparison.OrdinalIgnoreCase) ||
+                    werks.Equals("DH26", StringComparison.OrdinalIgnoreCase))
+                    group = "DC";
+                else if (werks.StartsWith("DH", StringComparison.OrdinalIgnoreCase))
+                    group = "DC";   // any other DH plant is also DC
+                else
+                    group = "";     // Store or Ecomm — app checks EX_WERKS for ecomm
+                obj["EX_WERKS"] = werks;
+                obj["EX_GROUP"] = group;
             }
             else
             {

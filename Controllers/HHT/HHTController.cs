@@ -601,31 +601,6 @@ namespace V2HHTMiddleware.Controllers.HHT
                     var sorted = new List<long>(_samples); sorted.Sort();
                     P95Ms = sorted[Math.Max(0, (int)Math.Ceiling(sorted.Count * 0.95) - 1)];
                 }
-            }
-
-            // Restore from persisted data (on startup)
-            public void RestoreFrom(PersistedStats p)
-            {
-                lock (_lock)
-                {
-                    Count     = p.Count;
-                    Errors    = p.Errors;
-                    MinMs     = p.MinMs;
-                    MaxMs     = p.MaxMs;
-                    AvgMs     = p.AvgMs;
-                    P95Ms     = p.P95Ms;
-                    LastError = p.LastError;
-                    DateTime.TryParse(p.LastSeen, out var dt);
-                    LastSeen  = dt;
-                    // Seed samples with AvgMs for percentile continuity
-                    _samples.Clear();
-                    for (int i = 0; i < Math.Min(10, (int)p.Count); i++)
-                        _samples.Add((long)p.AvgMs);
-                }
-            }
-        }
-    }
-
         private async Task<HttpResponseMessage> ProxyNoAcl()
         {
             string javaBase = GetJavaBase();
@@ -674,11 +649,32 @@ namespace V2HHTMiddleware.Controllers.HHT
                 sw.Stop();
                 return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
-            string jresp = Newtonsoft.Json.JsonConvert.SerializeObject(new { response = respBody ?? "" });
-            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
-            var result = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            result.Content = new StringContent(jresp, Encoding.UTF8, "application/json");
-            return result;
+            return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
         }
+
+            }
+
+            // Restore from persisted data (on startup)
+            public void RestoreFrom(PersistedStats p)
+            {
+                lock (_lock)
+                {
+                    Count     = p.Count;
+                    Errors    = p.Errors;
+                    MinMs     = p.MinMs;
+                    MaxMs     = p.MaxMs;
+                    AvgMs     = p.AvgMs;
+                    P95Ms     = p.P95Ms;
+                    LastError = p.LastError;
+                    DateTime.TryParse(p.LastSeen, out var dt);
+                    LastSeen  = dt;
+                    // Seed samples with AvgMs for percentile continuity
+                    _samples.Clear();
+                    for (int i = 0; i < Math.Min(10, (int)p.Count); i++)
+                        _samples.Add((long)p.AvgMs);
+                }
+            }
+        }
+    }
 
 }

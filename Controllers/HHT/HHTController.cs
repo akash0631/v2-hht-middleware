@@ -234,7 +234,7 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             // Recent calls
             sb.AppendLine();
-            sb.AppendLine("LAST 20 CALLS:");
+            sb.AppendLine("LAST 500 CALLS:");
             sb.AppendLine($"{"Timestamp",-20} {"Opcode",-35} {"Store",-6} {"Ms",6} {"SAP_OK",6} {"Resp",35}");
             sb.AppendLine(new string('-', 110));
             var recent = _ring.ToArray();

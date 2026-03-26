@@ -135,7 +135,7 @@ namespace V2HHTMiddleware.Controllers.HHT
         public HttpResponseMessage IndexJsp()
         {
             var resp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            resp.Content = new StringContent("{"status":"ok","server":"v2-hht-azure"}", Encoding.UTF8, "application/json");
+            resp.Content = new StringContent("{status:ok,server:v2-hht-azure}", Encoding.UTF8, "text/plain");
             return resp;
         }
 

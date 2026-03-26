@@ -581,7 +581,12 @@ namespace V2HHTMiddleware.Controllers.HHT
         {
             // v12 app sends: POST /noacljsonrfcadaptor?bapiname=RFC_NAME
             // Body: {"bapiname":"RFC","IM_PARAM1":"val",...}
-            // Returns: SAP JSON structure {"EX_RETURN":{"TYPE":"S"},"EX_WERKS":"...","EX_GROUP":"..."}
+            //
+            // Two-path strategy:
+            //   Path A: Try Java /noacljsonrfcadaptor with strict application/json
+            //           -> returns native SAP JSON for ALL new RFCs (ZGRT_*, ZFM_*, etc.)
+            //   Path B: Fall back to Java /ValueXMW if content-type rejected
+            //           -> works for older RFCs that exist in ValueXMW handler
 
             string javaBase = GetJavaBase();
             if (javaBase == null)
@@ -589,9 +594,9 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             string rawBody = preReadBody ?? await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            // Parse JSON body
+            // Parse bapi name and IM_ params
             string bapi  = "";
-            var imVals = new System.Collections.Generic.List<string>();
+            var imVals   = new System.Collections.Generic.List<string>();
             try
             {
                 var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
@@ -602,30 +607,63 @@ namespace V2HHTMiddleware.Controllers.HHT
             }
             catch { }
 
-            var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query ?? "");
+            var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "");
             if (string.IsNullOrEmpty(bapi)) bapi = qs["bapiname"] ?? "noacl";
 
-            // Map bapiname -> Java opcode
             string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
                             ? "scnrec" : bapi.ToLower();
 
-            // Build ValueXMW body: "opcode#val1#val2#...#<eol>"
-            var sb = new System.Text.StringBuilder(opcode);
-            foreach (var v in imVals) sb.Append("#").Append(v);
-            sb.Append("#<eol>");
-
             var sw = Stopwatch.StartNew();
-            string rawResp; bool sapOk;
+
+            // ── PATH A: Java /noacljsonrfcadaptor (native SAP JSON response) ────
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                string noaclUrl = javaBase.Replace("/xmwgw", "/xmwgw/noacljsonrfcadaptor")
+                                  + "?" + (qs.Count > 0 ? qs.ToString() : "bapiname=" + bapi + "&aclclientid=android");
+
+                // CRITICAL: set Content-Type as MediaTypeHeaderValue (no charset suffix)
+                // Java's noacljsonrfcadaptor checks for exact "application/json"
+                var noaclContent = new StringContent(rawBody, Encoding.UTF8);
+                noaclContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+
+                var noaclReq  = new HttpRequestMessage(HttpMethod.Post, noaclUrl) { Content = noaclContent };
+                var noaclResp = await _http.SendAsync(noaclReq).ConfigureAwait(false);
+                string noaclRaw = await noaclResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                // Java accepted the request if response is valid JSON (not the content-type error string)
+                if (!string.IsNullOrEmpty(noaclRaw) &&
+                    !noaclRaw.Contains("Only Applicaton/Json") &&
+                    !noaclRaw.Contains("Content Type Not supported") &&
+                    noaclRaw.TrimStart().StartsWith("{"))
                 {
-                    Content = new StringContent(sb.ToString(), Encoding.UTF8, "application/json")
+                    sw.Stop();
+                    bool ok = IsInfraOk(noaclRaw);
+                    LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
+                    var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                    nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
+                    return nativeResp;
+                }
+                // Java rejected content type — fall through to Path B
+            }
+            catch { /* fall through to ValueXMW */ }
+
+            // ── PATH B: Java /ValueXMW with old opcode format ────────────────────
+            // Translate: bapiname + IM_ values → "opcode#val1#val2#...#<eol>"
+            var legacySb = new System.Text.StringBuilder(opcode);
+            foreach (var v in imVals) legacySb.Append("#").Append(v);
+            legacySb.Append("#<eol>");
+
+            string respBody; bool sapOk;
+            try
+            {
+                var legReq = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(legacySb.ToString(), Encoding.UTF8, "application/json")
                 };
-                var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                var legResp = await _http.SendAsync(legReq).ConfigureAwait(false);
                 sw.Stop();
-                rawResp = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                sapOk   = IsInfraOk(rawResp);
+                respBody = await legResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk    = IsInfraOk(respBody);
             }
             catch (Exception ex)
             {
@@ -633,9 +671,9 @@ namespace V2HHTMiddleware.Controllers.HHT
                 return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
 
-            // Translate old "Response:N#param1#param2" format to SAP JSON for v12 app
-            string jsonOut = BuildSapJson(bapi, rawResp ?? "");
-            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, rawResp, sapOk, opcode);
+            // Translate old response format → SAP JSON for v12 app
+            string jsonOut = BuildSapJson(bapi, respBody ?? "");
+            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
             var httpOut = Request.CreateResponse(System.Net.HttpStatusCode.OK);
             httpOut.Content = new StringContent(jsonOut, Encoding.UTF8, "application/json");
             return httpOut;

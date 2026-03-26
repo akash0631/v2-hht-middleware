@@ -340,46 +340,72 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         private async Task<HttpResponseMessage> ProxyNoAcl()
         {
+            // New HHT app v12+ calls /noacljsonrfcadaptor?bapiname=RFC_NAME
+            // with JSON body { "bapiname":"RFC_NAME", "IM_USERID":"user", "IM_PASSWORD":"pass" }
+            // Java server only has /ValueXMW — so we translate to old opcode format here.
+
             string javaBase = GetJavaBase();
             if (javaBase == null)
-                return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
+                return LogAndReturn(null, 0, "E#HC tunnel down", false, "?");
 
-            string body   = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
-            string opcode = ExtractOpcode(body);
-            string store  = ExtractStore(body);
-            var    sw     = Stopwatch.StartNew();
-            string respBody;
-            bool   sapOk;
+            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var sw = Stopwatch.StartNew();
+
+            // Parse the JSON body
+            string opcode  = "";
+            string huser   = "";
+            string hpass   = "";
+            string hplant  = "1006"; // default plant
 
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/noacljsonrfcadaptor" + (Request.RequestUri.Query ?? ""))
-                {
-                    Content = new StringContent(body, Encoding.UTF8, "application/json")
-                };
-                foreach (var h in Request.Headers)
-                    if (h.Key.StartsWith("X-HHT-", StringComparison.OrdinalIgnoreCase))
-                        req.Headers.TryAddWithoutValidation(h.Key, h.Value);
-
-                var resp  = await _http.SendAsync(req).ConfigureAwait(false);
-                sw.Stop();
-                respBody  = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                sapOk     = IsInfraOk(respBody);
+                var json = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                opcode = json["bapiname"]?.ToString() ?? "";
+                huser  = json["IM_USERID"]?.ToString() ?? "";
+                hpass  = json["IM_PASSWORD"]?.ToString() ?? "";
+                if (json["IM_PLANT"] != null) hplant = json["IM_PLANT"].ToString();
             }
-            catch (TaskCanceledException)
+            catch { /* fall through with empty strings */ }
+
+            // Also check query string for bapiname
+            if (string.IsNullOrEmpty(opcode))
             {
+                var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
+                opcode = qs["bapiname"] ?? "";
+            }
+
+            if (string.IsNullOrEmpty(opcode))
+                return LogAndReturn(null, 0, "E#missing bapiname", false, "?");
+
+            // Build old-format form body for Java /ValueXMW
+            string formBody = $"opcode={Uri.EscapeDataString(opcode)}" +
+                              $"&Huser={Uri.EscapeDataString(huser)}" +
+                              $"&Hpassword={Uri.EscapeDataString(hpass)}" +
+                              $"&Hplant={Uri.EscapeDataString(hplant)}";
+
+            string respBody;
+            bool   sapOk;
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(formBody, Encoding.UTF8, "application/x-www-form-urlencoded")
+                };
+                var resp = await _http.SendAsync(req).ConfigureAwait(false);
                 sw.Stop();
-                respBody = "E#SAP timeout — RFC did not respond in 55s";
-                sapOk    = false;
+                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk    = IsInfraOk(respBody);
             }
             catch (Exception ex)
             {
                 sw.Stop();
-                respBody = "E#Proxy error: " + ex.Message.Replace("\n", " ");
-                sapOk    = false;
+                return LogAndReturn(null, (int)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
 
-            return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store);
+            RecordCall(opcode, (int)sw.ElapsedMilliseconds, sapOk);
+            var response = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            response.Content = new StringContent(respBody ?? "Response:null", Encoding.UTF8, "application/json");
+            return response;
         }
 
         // ═══════════════════════════════════════════════════════════════════════

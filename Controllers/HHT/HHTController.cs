@@ -132,9 +132,14 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpGet,  Route("noacljsonrfcadaptor")]
         public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
 
-        // ── index.jsp ─ v12 IPActivity connectivity check ──────────────
+        // ── index.jsp / ping ─ v12 IPActivity connectivity check ──────────
+        // URL rewrite maps /api/hht/index.jsp -> /api/hht/ping
         [HttpGet, Route("index.jsp")]
         public HttpResponseMessage IndexJspGet()
+            => Request.CreateResponse(System.Net.HttpStatusCode.OK);
+
+        [HttpGet, Route("ping")]
+        public HttpResponseMessage Ping()
             => Request.CreateResponse(System.Net.HttpStatusCode.OK);
         // index.jsp — GET only (v12 IPActivity connectivity check)
 

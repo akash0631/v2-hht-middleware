@@ -574,17 +574,13 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         private async Task<HttpResponseMessage> ProxyNoAcl()
         {
-            // v12+ app sends: POST /noacljsonrfcadaptor?bapiname=ZWM_RFC_NAME
-            // Body: {"bapiname":"ZWM_RFC_NAME","IM_PARAM1":"val1","IM_PARAM2":"val2",...}
-            //
-            // Strategy: translate to old opcode format and forward to Java /ValueXMW
-            // which we know works. The body format Java expects: "opcode#p1#p2#...#<eol>"
-            //
-            // Mapping rules:
-            //   ZWM_USER_AUTHORITY_CHECK -> scnrec  (login — Java internal name)
-            //   Everything else          -> bapiname.ToLower()  (Java uses lowercase RFC names)
-            //
-            // IM_ parameter order matters — we preserve JSON insertion order.
+            // v12+ app: POST /noacljsonrfcadaptor?bapiname=RFC_NAME
+            // Body: {"bapiname":"RFC","IM_PARAM1":"val",...}
+            // 
+            // Strategy:
+            //   1. Try Java /noacljsonrfcadaptor with application/json (native SAP JSON response)
+            //   2. If Java rejects content-type, fall back to ValueXMW opcode format
+            //   3. Translate ValueXMW response to SAP JSON structure for the app
 
             string javaBase = GetJavaBase();
             if (javaBase == null)
@@ -592,8 +588,9 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
 
-            // Parse JSON body
+            // Parse bapiname and IM_ params from JSON body
             string bapi  = "";
+            var    imMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
             var    imVals = new System.Collections.Generic.List<string>();
             try
             {
@@ -601,42 +598,67 @@ namespace V2HHTMiddleware.Controllers.HHT
                 bapi = jobj["bapiname"]?.ToString() ?? "";
                 foreach (var kv in jobj)
                     if (kv.Key.StartsWith("IM_", System.StringComparison.OrdinalIgnoreCase))
+                    {
+                        imMap[kv.Key] = kv.Value?.ToString() ?? "";
                         imVals.Add(kv.Value?.ToString() ?? "");
+                    }
             }
             catch { }
 
-            // Also check query string
-            if (string.IsNullOrEmpty(bapi))
-            {
-                var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query ?? "");
-                bapi = qs["bapiname"] ?? "";
-            }
-            if (string.IsNullOrEmpty(bapi))
-                return LogAndReturn("noacl", 0, "E#missing bapiname", false, "?");
-
-            // Map bapiname to Java opcode
+            var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query ?? "");
+            if (string.IsNullOrEmpty(bapi)) bapi = qs["bapiname"] ?? "noacl";
             string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
-                            ? "scnrec"
-                            : bapi.ToLower();
-
-            // Build body: "opcode#val1#val2#...#<eol>"
-            var sb = new System.Text.StringBuilder(opcode);
-            foreach (var v in imVals)
-                sb.Append("#").Append(v);
-            sb.Append("#<eol>");
+                            ? "scnrec" : bapi.ToLower();
 
             var sw = Stopwatch.StartNew();
-            string respBody; bool sapOk;
+            string rawResp;
+            bool   sapOk;
+
+            // ── Step 1: try Java /noacljsonrfcadaptor (native SAP JSON) ───────
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                string noaclUrl = javaBase.Replace("/xmwgw", "/xmwgw/noacljsonrfcadaptor")
+                                  + (Request.RequestUri.Query ?? "");
+                var noaclContent = new StringContent(rawBody, Encoding.UTF8);
+                noaclContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                noaclContent.Headers.ContentType.CharSet = "utf-8";
+
+                var noaclReq = new HttpRequestMessage(HttpMethod.Post, noaclUrl) { Content = noaclContent };
+                var noaclResp = await _http.SendAsync(noaclReq).ConfigureAwait(false);
+                rawResp = await noaclResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                // If Java accepted application/json → response is native SAP JSON, return as-is
+                if (!rawResp.Contains("Only Applicaton/Json") && !rawResp.Contains("Content Type Not supported"))
                 {
-                    Content = new StringContent(sb.ToString(), Encoding.UTF8, "application/json")
+                    sw.Stop();
+                    sapOk = IsInfraOk(rawResp);
+                    LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, rawResp, sapOk, opcode);
+                    var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                    nativeResp.Content = new StringContent(rawResp, Encoding.UTF8, "application/json");
+                    return nativeResp;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Fall through to ValueXMW approach
+                System.Diagnostics.Trace.WriteLine("[HHT] noacljsonrfcadaptor failed: " + ex.Message);
+            }
+
+            // ── Step 2: fall back to ValueXMW opcode format ───────────────────
+            string legacyBody = opcode;
+            foreach (var v in imVals) legacyBody += "#" + v;
+            legacyBody += "#<eol>";
+
+            try
+            {
+                var legReq = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(legacyBody, Encoding.UTF8, "application/json")
                 };
-                var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                var legResp = await _http.SendAsync(legReq).ConfigureAwait(false);
                 sw.Stop();
-                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                sapOk    = IsInfraOk(respBody);
+                rawResp = await legResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk   = IsInfraOk(rawResp);
             }
             catch (Exception ex)
             {
@@ -644,13 +666,46 @@ namespace V2HHTMiddleware.Controllers.HHT
                 return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
 
-            // Return JSON so v12 app (which uses JsonObjectRequest) can parse it
-            // Wrap raw response in JSON: {"response":"..."}
-            string jsonResp = Newtonsoft.Json.JsonConvert.SerializeObject(new { response = respBody ?? "" });
-            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
-            var httpResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            httpResp.Content = new StringContent(jsonResp, Encoding.UTF8, "application/json");
-            return httpResp;
+            // ── Step 3: translate old response format → SAP JSON ─────────────
+            // Old format: "Response:N#param1#param2#..." where N=0(fail) or 1(success)
+            string jsonOut = TranslateToSapJson(bapi, rawResp);
+            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, rawResp, sapOk, opcode);
+            var httpOut = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            httpOut.Content = new StringContent(jsonOut, Encoding.UTF8, "application/json");
+            return httpOut;
+        }
+
+        // Translate Java ValueXMW response to SAP JSON structure the v12 app expects
+        private string TranslateToSapJson(string bapi, string rawResp)
+        {
+            if (string.IsNullOrEmpty(rawResp) || rawResp == "Response:null")
+            {
+                return "{"EX_RETURN":{"TYPE":"E","MESSAGE":"No response from SAP"}}";
+            }
+
+            // Strip "Response:" prefix if present
+            string payload = rawResp.StartsWith("Response:") ? rawResp.Substring(9) : rawResp;
+            string[] parts = payload.TrimEnd('<', 'e', 'o', 'l', '>').Split('#');
+            string status = parts.Length > 0 ? parts[0].Trim() : "0";
+
+            if (status == "0" || status == "")
+            {
+                // Auth/operation failure
+                return "{"EX_RETURN":{"TYPE":"E","MESSAGE":"Operation failed. Please check credentials or SAP access."}}";
+            }
+
+            if (bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase))
+            {
+                // Login success: Response:1#WERKS#GROUP#<eol>
+                string werks = parts.Length > 1 ? parts[1].Trim() : "";
+                string group = parts.Length > 2 ? parts[2].Trim() : "";
+                return "{"EX_RETURN":{"TYPE":"S","MESSAGE":""},"EX_WERKS":""
+                       + werks + "","EX_GROUP":"" + group + ""}";
+            }
+
+            // Generic success: wrap in EX_RETURN success
+            return "{"EX_RETURN":{"TYPE":"S","MESSAGE":"","ET_DATA":[{"RESPONSE":""
+                   + rawResp.Replace("\", "\\").Replace(""", "\"") + ""}]}}";
         }
 
 

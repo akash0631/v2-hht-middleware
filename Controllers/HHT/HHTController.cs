@@ -355,7 +355,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/noacljsonrfcadaptor" + (Request.RequestUri.Query ?? ""))
                 {
-                    Content = new StringContent(body, Encoding.UTF8, "text/plain")
+                    Content = new StringContent(body, Encoding.UTF8, "application/json")
                 };
                 foreach (var h in Request.Headers)
                     if (h.Key.StartsWith("X-HHT-", StringComparison.OrdinalIgnoreCase))

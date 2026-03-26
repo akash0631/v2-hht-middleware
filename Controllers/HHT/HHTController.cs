@@ -641,57 +641,80 @@ namespace V2HHTMiddleware.Controllers.HHT
             return httpOut;
         }
 
-        // Translate Java ValueXMW "Response:N#p1#p2#..." into the SAP JSON
-        // structure that the v12 Android app (JsonObjectRequest) expects
+        // Translate Java ValueXMW "Response:X#p1#p2#..." → SAP JSON for v12 app
+        //
+        // Java response formats:
+        //   Response:1#data   = success with data
+        //   Response:0        = failure (auth or general)
+        //   Response:E#msg    = SAP explicit error with message
+        //   Response:S#data   = SAP success with structured data
+        //   Response:null     = opcode unknown to Java
         private string BuildSapJson(string bapi, string raw)
         {
+            if (string.IsNullOrEmpty(raw) || raw.Trim().Equals("Response:null", StringComparison.OrdinalIgnoreCase))
+            {
+                var e0 = new Newtonsoft.Json.Linq.JObject();
+                e0["EX_RETURN"] = new Newtonsoft.Json.Linq.JObject(
+                    new Newtonsoft.Json.Linq.JProperty("TYPE",    "E"),
+                    new Newtonsoft.Json.Linq.JProperty("MESSAGE", "Operation not supported. Please update the app.")
+                );
+                return e0.ToString(Newtonsoft.Json.Formatting.None);
+            }
+
             // Strip "Response:" prefix
             string payload = raw.StartsWith("Response:") ? raw.Substring(9) : raw;
-            payload = payload.TrimEnd().TrimEnd('>').TrimEnd('l').TrimEnd('o')
-                             .TrimEnd('e').TrimEnd('<').TrimEnd('#').Trim();
-            string[] parts = payload.Split('#');
-            string status  = parts.Length > 0 ? parts[0].Trim() : "0";
+
+            // Trim trailing #<eol> or <eol>
+            if (payload.EndsWith("<eol>")) payload = payload.Substring(0, payload.Length - 5);
+            payload = payload.TrimEnd('#').Trim();
+
+            string[] parts  = payload.Split('#');
+            string   status = parts.Length > 0 ? parts[0].Trim() : "";
 
             var obj = new Newtonsoft.Json.Linq.JObject();
 
-            if (status != "1")
+            // ── Explicit SAP error (Response:E#message) ──────────────────────
+            if (status.Equals("E", StringComparison.OrdinalIgnoreCase) ||
+                status.Equals("0"))
             {
-                // Failure
-                var ret = new Newtonsoft.Json.Linq.JObject();
-                ret["TYPE"]    = "E";
-                ret["MESSAGE"] = "Invalid credentials or operation failed.";
-                obj["EX_RETURN"] = ret;
+                string msg = parts.Length > 1
+                    ? string.Join(" ", parts, 1, parts.Length - 1).Trim()
+                    : (status == "0" ? "Authentication failed. Check your SAP credentials." : "SAP returned an error.");
+                obj["EX_RETURN"] = new Newtonsoft.Json.Linq.JObject(
+                    new Newtonsoft.Json.Linq.JProperty("TYPE",    "E"),
+                    new Newtonsoft.Json.Linq.JProperty("MESSAGE", msg)
+                );
                 return obj.ToString(Newtonsoft.Json.Formatting.None);
             }
 
-            // Success
-            var retOk = new Newtonsoft.Json.Linq.JObject();
-            retOk["TYPE"]    = "S";
-            retOk["MESSAGE"] = "";
-            obj["EX_RETURN"] = retOk;
+            // ── Success (Response:1#... or Response:S#...) ───────────────────
+            obj["EX_RETURN"] = new Newtonsoft.Json.Linq.JObject(
+                new Newtonsoft.Json.Linq.JProperty("TYPE",    "S"),
+                new Newtonsoft.Json.Linq.JProperty("MESSAGE", "")
+            );
 
-            if (bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase))
+            if (bapi.Equals("ZWM_USER_AUTHORITY_CHECK", StringComparison.OrdinalIgnoreCase))
             {
-                // Java returns: Response:1#WERKS  (no GROUP field)
-                // Derive EX_GROUP from WERKS — same logic v11.83 app used:
-                //   DH24, DH26 = DC/Warehouse users
-                //   DH25       = Ecomm users
-                //   Stores     = everything else (HD**, V0**, etc.)
+                // Login: Response:1#WERKS
+                // Derive EX_GROUP from WERKS (same logic as v11.83 app):
+                //   DH* plants = DC/Warehouse
+                //   DH25       = Ecomm
+                //   everything else = Store
                 string werks = parts.Length > 1 ? parts[1].Trim() : "";
-                string group;
-                if (werks.Equals("DH24", StringComparison.OrdinalIgnoreCase) ||
-                    werks.Equals("DH26", StringComparison.OrdinalIgnoreCase))
-                    group = "DC";
-                else if (werks.StartsWith("DH", StringComparison.OrdinalIgnoreCase))
-                    group = "DC";   // any other DH plant is also DC
-                else
-                    group = "";     // Store or Ecomm — app checks EX_WERKS for ecomm
+                string group = werks.StartsWith("DH", StringComparison.OrdinalIgnoreCase) ? "DC" : "";
+                if (werks.Equals("DH25", StringComparison.OrdinalIgnoreCase)) group = "";
                 obj["EX_WERKS"] = werks;
                 obj["EX_GROUP"] = group;
             }
             else
             {
-                // Generic op: wrap all params in ET_DATA array
+                // All other RFCs: pass the raw response through as a data field
+                // The app fragments check EX_RETURN.TYPE first, then read their
+                // own specific EX_ fields — for now pass raw in EX_RETURN.MESSAGE
+                // so at minimum it doesn't crash, and we can map fields later
+                obj["EX_RETURN"]["MESSAGE"] = raw;
+
+                // Also put full raw response in ET_DATA for fragments that read it
                 var arr = new Newtonsoft.Json.Linq.JArray();
                 var row = new Newtonsoft.Json.Linq.JObject();
                 row["RESPONSE"] = raw;

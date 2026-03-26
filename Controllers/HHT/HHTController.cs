@@ -238,6 +238,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 $"|calls_total={totalCalls}" +
                 $"|active_opcodes={activeOpcodes}" +
                 $"|registered_opcodes={registeredOpcodes}" +
+                $"|cache_entries={_cache.Count}" +
                 $"|stats_persisted={_statsLoaded}" +
                 $"|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC"
             );
@@ -571,6 +572,13 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static string ExtractOpcode(string body)
         {
             if (string.IsNullOrEmpty(body)) return "unknown";
+            // Handle dirty form-encoded bodies: "opcode=scnrec&huser=..."
+            if (body.StartsWith("opcode=", StringComparison.OrdinalIgnoreCase))
+            {
+                var val = body.Substring(7);
+                int amp = val.IndexOf('&');
+                return (amp > 0 ? val.Substring(0, amp) : val).Trim().ToLowerInvariant();
+            }
             int idx = body.IndexOf('#');
             return idx > 0 ? body.Substring(0, idx).Trim().ToLowerInvariant() : body.Trim().ToLowerInvariant();
         }

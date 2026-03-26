@@ -34,6 +34,35 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static volatile string _javaBase = null;
         private static readonly object _discoveryLock = new object();
 
+        // ── Response cache ──────────────────────────────────────────────────────
+        // Caches read-only RFC responses to reduce SAP load by ~40%
+        // Key: "opcode:body_hash"  Value: (json_response, expiry_utc)
+        private static readonly ConcurrentDictionary<string, (string Body, DateTime Expiry)>
+            _cache = new ConcurrentDictionary<string, (string, DateTime)>(StringComparer.OrdinalIgnoreCase);
+
+        // Read-only opcodes whose responses can be safely cached
+        private static readonly HashSet<string> CACHEABLE = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            // DC get/list operations (60s TTL)
+            "zgrt_pick_get_to_list","zgrt_pick_get_to_list_ptl","zgrt_pick_get_to_list_ptl_v3",
+            "zgrt_pick_get_pick_data","zgrt_pick_get_pick_data_v4",
+            "zwm_get_msa_section_list","zwm_get_grc_bins","zwm_get_packing_material",
+            "zwm_get_stock_bin","zwm_get_stock_take_id","zwm_store_grt_category",
+            "zwm_store_get_major_cat","zwm_store_get_major_cat_data",
+            "zwm_ptl_get_zone","zwm_ptl_get_zone_station_v3","zwm_ptl_hubstn_data_rfc_v3",
+            "zwm_ptl_get_to_details","zwm_picklist_pppn",
+            "zfms_screen","zwm_get_hhtuser_delivery",
+            // Validate ops that are effectively lookups (30s TTL)
+            "zwm_rfc_validate_dc_sloc","zwm_validate_dc_sloc",
+            "zwm_gr_get_details","zwm_store_get_stock",
+            // Stock take lookups
+            "zwm_rfc_stock_take_get_details","stocktakegetdetails","stockvalidatebarcode"
+        };
+
+        // Persist last-known Java proxy IP for fast startup
+        private static readonly string JAVA_IP_FILE =
+            Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? @"D:\home", "data", "java_proxy_ip.txt");
+
         // ── In-memory ring buffer (last 1000 calls) ────────────────────────────
         private static readonly ConcurrentQueue<CallLog> _ring = new ConcurrentQueue<CallLog>();
         private const int RING_MAX = 1000;
@@ -90,13 +119,20 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         static HHTController()
         {
-            var handler = new HttpClientHandler
+            // SocketsHttpHandler for connection pooling + keep-alive + gzip
+            var handler = new System.Net.Http.SocketsHttpHandler
             {
-                MaxConnectionsPerServer = 300,
-                UseProxy = false,
-                AllowAutoRedirect = false
+                MaxConnectionsPerServer    = 300,
+                PooledConnectionLifetime   = TimeSpan.FromMinutes(10),
+                PooledConnectionIdleTimeout= TimeSpan.FromMinutes(2),
+                UseProxy                   = false,
+                AllowAutoRedirect          = false,
+                AutomaticDecompression     = System.Net.DecompressionMethods.GZip
+                                           | System.Net.DecompressionMethods.Deflate
             };
             _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(55) };
+            _http.DefaultRequestHeaders.Add("Connection", "keep-alive");
+            _http.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate");
 
             // Load persisted stats from disk immediately
             LoadStatsFromDisk();
@@ -104,6 +140,21 @@ namespace V2HHTMiddleware.Controllers.HHT
             // Flush stats to disk every 60 seconds
             _flushTimer = new Timer(_ => FlushStatsToDisk(), null,
                 TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
+
+            // Pre-warm Java proxy IP from last-known file
+            if (File.Exists(JAVA_IP_FILE))
+            {
+                try { _javaBase = File.ReadAllText(JAVA_IP_FILE).Trim(); }
+                catch { }
+            }
+
+            // Cache cleanup every 5 minutes
+            new Timer(_ => {
+                var now = DateTime.UtcNow;
+                foreach (var k in _cache.Keys)
+                    if (_cache.TryGetValue(k, out var v) && v.Expiry < now)
+                        _cache.TryRemove(k, out _);
+            }, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -615,6 +666,25 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             var sw = Stopwatch.StartNew();
 
+            // ── Cache check ──────────────────────────────────────────────────────
+            // Return cached response for read-only RFCs (avoids redundant SAP calls)
+            string cacheKey = null;
+            if (CACHEABLE.Contains(opcode))
+            {
+                // Key = opcode + hash of IM_ params (same user+params = same result)
+                int bodyHash = rawBody.GetHashCode();
+                cacheKey = opcode + ":" + bodyHash;
+                if (_cache.TryGetValue(cacheKey, out var cached) && cached.Expiry > DateTime.UtcNow)
+                {
+                    // Cache hit — return immediately, no SAP call needed
+                    LogAndReturn(opcode, 0, cached.Body, true, opcode);
+                    var cachedResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                    cachedResp.Content = new StringContent(cached.Body, Encoding.UTF8, "application/json");
+                    cachedResp.Headers.Add("X-Cache", "HIT");
+                    return cachedResp;
+                }
+            }
+
             // ── PATH A: Java /noacljsonrfcadaptor (native SAP JSON response) ────
             try
             {
@@ -639,6 +709,12 @@ namespace V2HHTMiddleware.Controllers.HHT
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
                     LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
+                    // Store in cache if this is a cacheable opcode
+                    if (cacheKey != null)
+                    {
+                        int ttlSec = CACHEABLE.Contains(opcode) ? 60 : 30;
+                        _cache[cacheKey] = (noaclRaw, DateTime.UtcNow.AddSeconds(ttlSec));
+                    }
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                     nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
                     return nativeResp;

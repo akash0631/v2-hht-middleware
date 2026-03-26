@@ -121,26 +121,73 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
-        // ── noacljsonrfcadaptor — new app format (v12+) ────────────────────
-        [HttpPost, Route("noacljsonrfcadaptor")]
-        public Task<HttpResponseMessage> NoAclJson() => ProxyNoAcl();
 
-        [HttpGet, Route("noacljsonrfcadaptor")]
-        public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
+        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
+        public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
 
-        // ── index.jsp — IPActivity connectivity check ───────────────────────
-        // IPActivity calls baseUrl + "/index.jsp" = /api/hht/index.jsp — must return 200
+        // ── index.jsp — Android IPActivity connectivity check ──────────────────
         [HttpGet,  Route("index.jsp")]
         [HttpPost, Route("index.jsp")]
         public HttpResponseMessage IndexJsp()
         {
-            var resp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            resp.Content = new StringContent("{status:ok,server:v2-hht-azure}", Encoding.UTF8, "text/plain");
-            return resp;
+            var r = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            r.Content = new StringContent("ok", Encoding.UTF8, "text/plain");
+            return r;
         }
 
-        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
-        public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
+        // ── noacljsonrfcadaptor — new app v12+ sends JSON, translate to form data ──
+        // New app sends: POST ValueXMW (base) → strips last segment → appends /noacljsonrfcadaptor
+        // Body: { "bapiname": "ZWM_USER_AUTHORITY_CHECK", "IM_USERID": "u", "IM_PASSWORD": "p" }
+        // We translate to old opcode form and forward to Java /ValueXMW (unchanged)
+        [HttpPost, Route("noacljsonrfcadaptor")]
+        public async Task<HttpResponseMessage> NoAclJsonRfcAdaptor()
+        {
+            string javaBase = GetJavaBase();
+            if (javaBase == null)
+                return LogAndReturn(null, 0, "E#HC tunnel down", false, "?");
+
+            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var sw = Stopwatch.StartNew();
+
+            // Parse JSON body from new app
+            string opcode = "", huser = "", hpass = "", hplant = "1006";
+            try
+            {
+                var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
+                opcode = qs["bapiname"] ?? "";
+                var jObj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                if (string.IsNullOrEmpty(opcode)) opcode = jObj["bapiname"]?.ToString() ?? "";
+                huser   = jObj["IM_USERID"]?.ToString()   ?? "";
+                hpass   = jObj["IM_PASSWORD"]?.ToString()  ?? "";
+                hplant  = jObj["IM_PLANT"]?.ToString()     ?? "1006";
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(opcode))
+                return LogAndReturn(null, 0, "E#missing bapiname", false, "?");
+
+            // Forward as old form-data format to Java /ValueXMW — same as Proxy()
+            string formBody = $"opcode={Uri.EscapeDataString(opcode)}&Huser={Uri.EscapeDataString(huser)}&Hpassword={Uri.EscapeDataString(hpass)}&Hplant={Uri.EscapeDataString(hplant)}";
+            string respBody; bool sapOk;
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(formBody, Encoding.UTF8, "text/plain")
+                };
+                var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                sw.Stop();
+                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk    = IsInfraOk(respBody);
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                return LogAndReturn(null, (int)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
+            }
+
+            return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, opcode);
+        }
 
         [HttpGet, Route("appversion")]
         public HttpResponseMessage AppVersion()
@@ -346,73 +393,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             }
 
             return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store);
-        }
-
-        private async Task<HttpResponseMessage> ProxyNoAcl()
-        {
-            // New HHT app v12+ calls /noacljsonrfcadaptor?bapiname=RFC_NAME
-            // with JSON body { "bapiname":"RFC_NAME", "IM_USERID":"user", "IM_PASSWORD":"pass" }
-            // Java server only has /ValueXMW — so we translate to old opcode format here.
-
-            string javaBase = GetJavaBase();
-            if (javaBase == null)
-                return LogAndReturn(null, 0, "E#HC tunnel down", false, "?");
-
-            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var sw = Stopwatch.StartNew();
-
-            // Parse the JSON body
-            string opcode  = "";
-            string huser   = "";
-            string hpass   = "";
-            string hplant  = "1006"; // default plant
-
-            try
-            {
-                var json = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
-                opcode = json["bapiname"]?.ToString() ?? "";
-                huser  = json["IM_USERID"]?.ToString() ?? "";
-                hpass  = json["IM_PASSWORD"]?.ToString() ?? "";
-                if (json["IM_PLANT"] != null) hplant = json["IM_PLANT"].ToString();
-            }
-            catch { /* fall through with empty strings */ }
-
-            // Also check query string for bapiname
-            if (string.IsNullOrEmpty(opcode))
-            {
-                var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
-                opcode = qs["bapiname"] ?? "";
-            }
-
-            if (string.IsNullOrEmpty(opcode))
-                return LogAndReturn(null, 0, "E#missing bapiname", false, "?");
-
-            // Build old-format form body for Java /ValueXMW
-            string formBody = $"opcode={Uri.EscapeDataString(opcode)}" +
-                              $"&Huser={Uri.EscapeDataString(huser)}" +
-                              $"&Hpassword={Uri.EscapeDataString(hpass)}" +
-                              $"&Hplant={Uri.EscapeDataString(hplant)}";
-
-            string respBody;
-            bool   sapOk;
-            try
-            {
-                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
-                {
-                    Content = new StringContent(formBody, Encoding.UTF8, "text/plain")
-                };
-                var resp = await _http.SendAsync(req).ConfigureAwait(false);
-                sw.Stop();
-                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                sapOk    = IsInfraOk(respBody);
-            }
-            catch (Exception ex)
-            {
-                sw.Stop();
-                return LogAndReturn(null, (int)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
-            }
-
-            return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
         }
 
         // ═══════════════════════════════════════════════════════════════════════

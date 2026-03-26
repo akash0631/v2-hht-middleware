@@ -122,6 +122,13 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
 
+        // ── noacljsonrfcadaptor — v12+ HHT app (new API format) ────────────
+        [HttpPost, Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJson() => ProxyNoAcl();
+
+        [HttpGet, Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
+
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
 
@@ -329,6 +336,60 @@ namespace V2HHTMiddleware.Controllers.HHT
             }
 
             return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store);
+        }
+
+        private async Task<HttpResponseMessage> ProxyNoAcl()
+        {
+            // New HHT app v12+ hits /noacljsonrfcadaptor with JSON body
+            // Forward to Java /noacljsonrfcadaptor — same endpoint, Java handles it natively
+
+            string javaBase = GetJavaBase();
+            if (javaBase == null)
+                return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
+
+            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            // Extract opcode for stats tracking
+            string opcode = "noacl";
+            string store  = "?";
+            try
+            {
+                var json = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                opcode = json["bapiname"]?.ToString() ?? "noacl";
+            }
+            catch { }
+
+            var sw = Stopwatch.StartNew();
+            string respBody;
+            bool   sapOk;
+
+            try
+            {
+                // Forward the JSON body as-is to Java /noacljsonrfcadaptor
+                // Java expects application/json Content-Type for this endpoint
+                string javaUrl = javaBase.Replace("/xmwgw", "") + ":9080/xmwgw/noacljsonrfcadaptor"
+                                 + (Request.RequestUri.Query ?? "");
+
+                var content = new StringContent(rawBody, Encoding.UTF8, "application/json");
+                content.Headers.ContentType.CharSet = "utf-8";
+
+                var req = new HttpRequestMessage(HttpMethod.Post, javaUrl)
+                {
+                    Content = content
+                };
+
+                var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                sw.Stop();
+                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk    = IsInfraOk(respBody);
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                return LogAndReturn(null, (int)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
+            }
+
+            return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, store);
         }
 
         // ═══════════════════════════════════════════════════════════════════════

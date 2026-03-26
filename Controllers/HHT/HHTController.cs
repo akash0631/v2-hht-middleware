@@ -340,22 +340,36 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         private async Task<HttpResponseMessage> ProxyNoAcl()
         {
-            // New HHT app v12+ hits /noacljsonrfcadaptor with JSON body
-            // Forward to Java /noacljsonrfcadaptor — same endpoint, Java handles it natively
+            // v12+ app sends: POST /noacljsonrfcadaptor?bapiname=ZWM_RFC_NAME
+            // Body: {"bapiname":"ZWM_RFC_NAME","IM_PARAM1":"val1","IM_PARAM2":"val2",...}
+            //
+            // Java /ValueXMW accepts: "opcode#param1#param2#...#<eol>" with Content-Type: application/json
+            // Mapping: bapiname → opcode is direct (Java /ValueXMW recognises SAP RFC names via bapiname query)
+            // We POST the body as: "bapiname#val1#val2#<eol>" where vals come from IM_ fields in order
 
             string javaBase = GetJavaBase();
             if (javaBase == null)
-                return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
+                return LogAndReturn(null, 0, "E#HC tunnel down", false, "?");
 
             string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-            // Extract opcode for stats tracking
-            string opcode = "noacl";
+            var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query ?? "");
+            string opcode = qs["bapiname"] ?? "noacl";
             string store  = "?";
+
+            // Build old-format body: opcode#IM_val1#IM_val2#...<eol>
+            string legacyBody = rawBody; // fallback: pass raw
             try
             {
                 var json = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
-                opcode = json["bapiname"]?.ToString() ?? "noacl";
+                opcode = json["bapiname"]?.ToString() ?? opcode;
+                // Collect all IM_ parameters in the order they appear
+                var imVals = new System.Collections.Generic.List<string>();
+                foreach (var kv in json)
+                {
+                    if (kv.Key.StartsWith("IM_", StringComparison.OrdinalIgnoreCase))
+                        imVals.Add(kv.Value?.ToString() ?? "");
+                }
+                legacyBody = opcode + "#" + string.Join("#", imVals) + "#<eol>";
             }
             catch { }
 
@@ -365,20 +379,10 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             try
             {
-                // Forward the JSON body as-is to Java /noacljsonrfcadaptor
-                // Java expects application/json Content-Type for this endpoint
-                // javaBase = "http://127.0.0.x:9080/xmwgw" — just swap the path
-                string javaUrl = javaBase.Replace("/xmwgw", "/xmwgw/noacljsonrfcadaptor")
-                                 + (Request.RequestUri.Query ?? "");
-
-                var content = new StringContent(rawBody, Encoding.UTF8, "application/json");
-                content.Headers.ContentType.CharSet = "utf-8";
-
-                var req = new HttpRequestMessage(HttpMethod.Post, javaUrl)
+                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
                 {
-                    Content = content
+                    Content = new StringContent(legacyBody, Encoding.UTF8, "application/json")
                 };
-
                 var resp = await _http.SendAsync(req).ConfigureAwait(false);
                 sw.Stop();
                 respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);

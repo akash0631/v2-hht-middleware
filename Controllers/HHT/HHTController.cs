@@ -367,7 +367,8 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 // Forward the JSON body as-is to Java /noacljsonrfcadaptor
                 // Java expects application/json Content-Type for this endpoint
-                string javaUrl = javaBase.Replace("/xmwgw", "") + ":9080/xmwgw/noacljsonrfcadaptor"
+                // javaBase = "http://127.0.0.x:9080/xmwgw" — just swap the path
+                string javaUrl = javaBase.Replace("/xmwgw", "/xmwgw/noacljsonrfcadaptor")
                                  + (Request.RequestUri.Query ?? "");
 
                 var content = new StringContent(rawBody, Encoding.UTF8, "application/json");

@@ -561,6 +561,12 @@ namespace V2HHTMiddleware.Controllers.HHT
                 int best = int.MaxValue;
                 foreach (var x in found) if (x < best) best = x;
                 _javaBase = best < int.MaxValue ? $"http://127.0.0.{best}:9080/xmwgw" : null;
+                // Persist discovered IP for fast startup next time
+                if (_javaBase != null)
+                    try {
+                        Directory.CreateDirectory(Path.GetDirectoryName(JAVA_IP_FILE) ?? ".");
+                        File.WriteAllText(JAVA_IP_FILE, _javaBase);
+                    } catch { }
                 return _javaBase;
             }
         }

@@ -122,12 +122,18 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
         // ── noacljsonrfcadaptor — new app format (v12+) ────────────────────
-        // Forwards to Java's own /noacljsonrfcadaptor endpoint (not /ValueXMW)
         [HttpPost, Route("noacljsonrfcadaptor")]
         public Task<HttpResponseMessage> NoAclJson() => ProxyNoAcl();
 
         [HttpGet, Route("noacljsonrfcadaptor")]
         public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
+
+        // ── index.jsp — IPActivity connectivity check ───────────────────────
+        // Android app hits /index.jsp to test if middleware is reachable (expects HTTP 200)
+        [HttpGet,  Route("~/index.jsp")]
+        [HttpPost, Route("~/index.jsp")]
+        public HttpResponseMessage IndexJsp()
+            => Request.CreateResponse(System.Net.HttpStatusCode.OK, new { status = "ok", server = "v2-hht-azure" });
 
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
@@ -389,7 +395,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
                 {
-                    Content = new StringContent(formBody, Encoding.UTF8, "application/x-www-form-urlencoded")
+                    Content = new StringContent(formBody, Encoding.UTF8, "text/plain")
                 };
                 var resp = await _http.SendAsync(req).ConfigureAwait(false);
                 sw.Stop();

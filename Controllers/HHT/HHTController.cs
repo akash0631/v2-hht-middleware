@@ -131,13 +131,21 @@ namespace V2HHTMiddleware.Controllers.HHT
         public Task<HttpResponseMessage> NoAclJson()    => ProxyNoAcl();
         [HttpGet,  Route("noacljsonrfcadaptor")]
         public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
-        [HttpGet,  Route("index.jsp")]
-        [HttpPost, Route("index.jsp")]
-        public HttpResponseMessage IndexJsp()
+        // index.jsp — GET only (v12 IPActivity connectivity check)
+        [HttpGet, Route("index.jsp")]
+        public HttpResponseMessage IndexJspGet()
         {
-            var ok = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            ok.Content = new StringContent("OK", Encoding.UTF8, "text/plain");
-            return ok;
+            var resp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            resp.Content = new StringContent("OK", Encoding.UTF8, "text/plain");
+            return resp;
+        }
+
+        [HttpPost, Route("index.jsp")]
+        public HttpResponseMessage IndexJspPost()
+        {
+            var resp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            resp.Content = new StringContent("OK", Encoding.UTF8, "text/plain");
+            return resp;
         }
 
         [HttpGet, Route("appversion")]

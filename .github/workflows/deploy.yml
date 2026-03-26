@@ -2,7 +2,7 @@ name: Deploy V2 HHT Middleware to Azure
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master, main, azure-optimised ]
   workflow_dispatch:
 
 jobs:

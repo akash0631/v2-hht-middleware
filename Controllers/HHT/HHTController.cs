@@ -135,9 +135,9 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpPost, Route("index.jsp")]
         public HttpResponseMessage IndexJsp()
         {
-            var resp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            resp.Content = new StringContent("OK", Encoding.UTF8, "text/plain");
-            return resp;
+            var ok = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            ok.Content = new StringContent("OK", Encoding.UTF8, "text/plain");
+            return ok;
         }
 
         [HttpGet, Route("appversion")]

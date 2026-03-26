@@ -129,11 +129,15 @@ namespace V2HHTMiddleware.Controllers.HHT
         public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
 
         // ── index.jsp — IPActivity connectivity check ───────────────────────
-        // Android app hits /index.jsp to test if middleware is reachable (expects HTTP 200)
-        [HttpGet,  Route("~/index.jsp")]
-        [HttpPost, Route("~/index.jsp")]
+        // IPActivity calls baseUrl + "/index.jsp" = /api/hht/index.jsp — must return 200
+        [HttpGet,  Route("index.jsp")]
+        [HttpPost, Route("index.jsp")]
         public HttpResponseMessage IndexJsp()
-            => Request.CreateResponse(System.Net.HttpStatusCode.OK, new { status = "ok", server = "v2-hht-azure" });
+        {
+            var resp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            resp.Content = new StringContent("{"status":"ok","server":"v2-hht-azure"}", Encoding.UTF8, "application/json");
+            return resp;
+        }
 
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
@@ -408,7 +412,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 return LogAndReturn(null, (int)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
 
-            return LogAndReturn(respBody, (int)sw.ElapsedMilliseconds, null, sapOk, opcode);
+            return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
         }
 
         // ═══════════════════════════════════════════════════════════════════════

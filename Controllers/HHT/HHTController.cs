@@ -122,11 +122,12 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
         // ── noacljsonrfcadaptor — new app format (v12+) ────────────────────
+        // Forwards to Java's own /noacljsonrfcadaptor endpoint (not /ValueXMW)
         [HttpPost, Route("noacljsonrfcadaptor")]
-        public Task<HttpResponseMessage> NoAclJson() => Proxy();
+        public Task<HttpResponseMessage> NoAclJson() => ProxyNoAcl();
 
         [HttpGet, Route("noacljsonrfcadaptor")]
-        public Task<HttpResponseMessage> NoAclJsonGet() => Proxy();
+        public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
 
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
@@ -309,6 +310,50 @@ namespace V2HHTMiddleware.Controllers.HHT
             try
             {
                 var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "text/plain")
+                };
+                foreach (var h in Request.Headers)
+                    if (h.Key.StartsWith("X-HHT-", StringComparison.OrdinalIgnoreCase))
+                        req.Headers.TryAddWithoutValidation(h.Key, h.Value);
+
+                var resp  = await _http.SendAsync(req).ConfigureAwait(false);
+                sw.Stop();
+                respBody  = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk     = IsInfraOk(respBody);
+            }
+            catch (TaskCanceledException)
+            {
+                sw.Stop();
+                respBody = "E#SAP timeout — RFC did not respond in 55s";
+                sapOk    = false;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                respBody = "E#Proxy error: " + ex.Message.Replace("\n", " ");
+                sapOk    = false;
+            }
+
+            return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store);
+        }
+
+        private async Task<HttpResponseMessage> ProxyNoAcl()
+        {
+            string javaBase = GetJavaBase();
+            if (javaBase == null)
+                return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
+
+            string body   = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+            string opcode = ExtractOpcode(body);
+            string store  = ExtractStore(body);
+            var    sw     = Stopwatch.StartNew();
+            string respBody;
+            bool   sapOk;
+
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/noacljsonrfcadaptor" + (Request.RequestUri.Query ?? ""))
                 {
                     Content = new StringContent(body, Encoding.UTF8, "text/plain")
                 };

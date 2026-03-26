@@ -119,17 +119,18 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         static HHTController()
         {
-            // SocketsHttpHandler for connection pooling + keep-alive + gzip
-            var handler = new System.Net.Http.SocketsHttpHandler
+            // HttpClientHandler with gzip + keep-alive (.NET 4.8 compatible)
+            var handler = new HttpClientHandler
             {
-                MaxConnectionsPerServer    = 300,
-                PooledConnectionLifetime   = TimeSpan.FromMinutes(10),
-                PooledConnectionIdleTimeout= TimeSpan.FromMinutes(2),
-                UseProxy                   = false,
-                AllowAutoRedirect          = false,
-                AutomaticDecompression     = System.Net.DecompressionMethods.GZip
-                                           | System.Net.DecompressionMethods.Deflate
+                MaxConnectionsPerServer  = 300,
+                UseProxy                 = false,
+                AllowAutoRedirect        = false,
+                AutomaticDecompression   = System.Net.DecompressionMethods.GZip
+                                         | System.Net.DecompressionMethods.Deflate
             };
+            // ServicePoint controls connection pooling on .NET 4.8
+            System.Net.ServicePointManager.DefaultConnectionLimit = 300;
+            System.Net.ServicePointManager.MaxServicePointIdleTime = 120000;
             _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(55) };
             _http.DefaultRequestHeaders.Add("Connection", "keep-alive");
             _http.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate");
@@ -153,7 +154,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 var now = DateTime.UtcNow;
                 foreach (var k in _cache.Keys)
                     if (_cache.TryGetValue(k, out var v) && v.Expiry < now)
-                        _cache.TryRemove(k, out _);
+                        _cache.TryRemove(k, out var ignored);
             }, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
         }
 

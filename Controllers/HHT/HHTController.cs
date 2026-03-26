@@ -193,6 +193,40 @@ namespace V2HHTMiddleware.Controllers.HHT
         }
 
         // ── Stats ──────────────────────────────────────────────────────────────
+        // ── Debug endpoint — test Java /noacljsonrfcadaptor directly ────────
+        [HttpGet, Route("debug/noacl")]
+        public async Task<HttpResponseMessage> DebugNoAcl()
+        {
+            string javaBase = GetJavaBase();
+            if (javaBase == null)
+            {
+                var e = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                e.Content = new StringContent("java_base=null", Encoding.UTF8, "text/plain");
+                return e;
+            }
+            string url = javaBase.Replace("/xmwgw", "/xmwgw/noacljsonrfcadaptor")
+                         + "?bapiname=ZWM_USER_AUTHORITY_CHECK&aclclientid=android";
+            string testBody = "{"bapiname":"ZWM_USER_AUTHORITY_CHECK","IM_USERID":"250","IM_PASSWORD":"250"}";
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("url=" + url);
+            try
+            {
+                var content = new StringContent(testBody, Encoding.UTF8);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+                var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                string raw = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                string ct  = resp.Content.Headers.ContentType?.ToString() ?? "null";
+                sb.AppendLine("status=" + (int)resp.StatusCode);
+                sb.AppendLine("content_type=" + ct);
+                sb.AppendLine("body=" + raw);
+            }
+            catch (Exception ex) { sb.AppendLine("error=" + ex.Message); }
+            var r = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            r.Content = new StringContent(sb.ToString(), Encoding.UTF8, "text/plain");
+            return r;
+        }
+
         [HttpGet, Route("stats")]
         public HttpResponseMessage Stats()
         {

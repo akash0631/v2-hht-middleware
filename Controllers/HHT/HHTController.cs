@@ -142,11 +142,11 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         [HttpGet, Route("appversion")]
         public HttpResponseMessage AppVersion()
-            => Json($"{{\"upgrade\":\"force\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+            => Json($"{{\"upgrade\":\"none\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
 
         [HttpGet, Route("ValueXMW/appversion")]
         public HttpResponseMessage AppVersionLegacy()
-            => Json($"{{\"upgrade\":\"force\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+            => Json($"{{\"upgrade\":\"none\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
 
         // ── Health ─────────────────────────────────────────────────────────────
         [HttpGet, Route("health")]

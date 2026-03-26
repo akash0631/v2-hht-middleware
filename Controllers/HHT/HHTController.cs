@@ -640,7 +640,7 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             // Return JSON so v12 app (which uses JsonObjectRequest) can parse it
             // Wrap raw response in JSON: {"response":"..."}
-            string jsonResp = "{"response":" + Newtonsoft.Json.JsonConvert.SerializeObject(respBody ?? "") + "}";
+            string jsonResp = Newtonsoft.Json.JsonConvert.SerializeObject(new { response = respBody ?? "" });
             LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
             var httpResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
             httpResp.Content = new StringContent(jsonResp, Encoding.UTF8, "application/json");

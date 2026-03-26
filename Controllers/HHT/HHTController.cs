@@ -315,6 +315,11 @@ namespace V2HHTMiddleware.Controllers.HHT
                 return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
 
             string body   = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            // v12 app posts JSON to /ValueXMW — route to ProxyNoAcl which returns SAP JSON
+            if (body.TrimStart().StartsWith("{"))
+                return await ProxyNoAcl(body).ConfigureAwait(false);
+
             string opcode = ExtractOpcode(body);
             string store  = ExtractStore(body);
             var    sw     = Stopwatch.StartNew();
@@ -572,7 +577,7 @@ namespace V2HHTMiddleware.Controllers.HHT
         }
 
 
-        private async Task<HttpResponseMessage> ProxyNoAcl()
+        private async Task<HttpResponseMessage> ProxyNoAcl(string preReadBody = null)
         {
             // v12 app sends: POST /noacljsonrfcadaptor?bapiname=RFC_NAME
             // Body: {"bapiname":"RFC","IM_PARAM1":"val",...}
@@ -582,7 +587,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             if (javaBase == null)
                 return LogAndReturn("noacl", 0, "E#HC tunnel down", false, "?");
 
-            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+            string rawBody = preReadBody ?? await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             // Parse JSON body
             string bapi  = "";

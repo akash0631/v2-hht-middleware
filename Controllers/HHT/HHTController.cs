@@ -125,19 +125,12 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
 
-        // ── noacljsonrfcadaptor ─────────────────────────────────────────────────
-        // New HHT app v12+ calls this endpoint with JSON:
-        //   POST /api/hht/noacljsonrfcadaptor?bapiname=RFC_NAME
-        //   Body: { "bapiname":"RFC_NAME", "IM_USERID":"user", "IM_PASSWORD":"pass", ... }
-        // We translate to the old text/plain opcode format that Java /ValueXMW understands,
-        // then return the response as JSON so JsonObjectRequest can parse it.
-        [HttpPost, Route("noacljsonrfcadaptor")]
-        public Task<HttpResponseMessage> NoAclJson()   => ProxyNoAcl();
 
+        // ── v12+ app ─────────────────────────────────────────────────────────
+        [HttpPost, Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJson()    => ProxyNoAcl();
         [HttpGet,  Route("noacljsonrfcadaptor")]
         public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
-
-        // IPActivity connectivity check — app calls baseUrl + /index.jsp, expects HTTP 200
         [HttpGet,  Route("index.jsp")]
         [HttpPost, Route("index.jsp")]
         public HttpResponseMessage IndexJsp()
@@ -146,7 +139,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             resp.Content = new StringContent("OK", Encoding.UTF8, "text/plain");
             return resp;
         }
-
 
         [HttpGet, Route("appversion")]
         public HttpResponseMessage AppVersion()
@@ -634,67 +626,43 @@ namespace V2HHTMiddleware.Controllers.HHT
         }
     }
 
-        // ── ProxyNoAcl ─────────────────────────────────────────────────────────
-        // Translates new JSON body from v12+ app into old opcode= form
-        // then forwards to Java /ValueXMW exactly as Proxy() does.
         private async Task<HttpResponseMessage> ProxyNoAcl()
         {
             string javaBase = GetJavaBase();
             if (javaBase == null)
-                return LogAndReturn("?", 0, "E#HC tunnel down", false, "?");
-
-            // Read and parse the JSON body
+                return LogAndReturn("noAcl", 0, "E#HC tunnel down", false, "?");
             string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
             string opcode  = "";
-            var    fields  = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
-
+            var fields = new System.Collections.Generic.Dictionary<string,string>(System.StringComparer.OrdinalIgnoreCase);
             try
             {
-                var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
-                foreach (var prop in jobj.Properties())
-                    fields[prop.Name] = prop.Value?.ToString() ?? "";
+                var j = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                foreach (var p in j.Properties()) fields[p.Name] = p.Value?.ToString() ?? "";
             }
-            catch { /* fall through — opcode will stay empty */ }
-
-            // Also check query string for bapiname (app sends it both ways)
+            catch { }
             var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
-            opcode = fields.ContainsKey("bapiname") ? fields["bapiname"]
-                   : (qs["bapiname"] ?? "");
-
+            opcode = fields.ContainsKey("bapiname") ? fields["bapiname"] : (qs["bapiname"] ?? "");
             if (string.IsNullOrEmpty(opcode))
-                return LogAndReturn("?", 0, "E#missing bapiname", false, "?");
-
-            // Map JSON field names → old param names Java /ValueXMW understands
-            var paramMap = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase)
+                return LogAndReturn("noAcl", 0, "E#missing bapiname", false, "?");
+            var map = new System.Collections.Generic.Dictionary<string,string>(System.StringComparer.OrdinalIgnoreCase)
             {
-                ["IM_USERID"]   = "Huser",
-                ["IM_PASSWORD"] = "Hpassword",
-                ["IM_PLANT"]    = "Hplant",
-                ["IM_LGORT"]    = "Hlgort",
-                ["IM_STORE"]    = "Hstore",
+                { "IM_USERID", "Huser" }, { "IM_PASSWORD", "Hpassword" },
+                { "IM_PLANT",  "Hplant" }, { "IM_LGORT",  "Hlgort" },
             };
-
-            // Build the opcode= body string
-            var sb = new System.Text.StringBuilder();
-            sb.Append("opcode=").Append(Uri.EscapeDataString(opcode));
+            var sb = new System.Text.StringBuilder("opcode=").Append(Uri.EscapeDataString(opcode));
             foreach (var kv in fields)
             {
                 if (kv.Key.Equals("bapiname", System.StringComparison.OrdinalIgnoreCase)) continue;
-                string paramName = paramMap.ContainsKey(kv.Key) ? paramMap[kv.Key] : kv.Key;
-                sb.Append('&').Append(Uri.EscapeDataString(paramName))
-                  .Append('=').Append(Uri.EscapeDataString(kv.Value));
+                string pname = map.ContainsKey(kv.Key) ? map[kv.Key] : kv.Key;
+                sb.Append('&').Append(Uri.EscapeDataString(pname)).Append('=').Append(Uri.EscapeDataString(kv.Value));
             }
-            string formBody = sb.ToString();
-
-            // Forward to Java /ValueXMW — same as Proxy() but with translated body
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            string respBody;
-            bool   sapOk;
+            string respBody; bool sapOk;
             try
             {
                 var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
                 {
-                    Content = new StringContent(formBody, Encoding.UTF8, "text/plain")
+                    Content = new StringContent(sb.ToString(), Encoding.UTF8, "text/plain")
                 };
                 var resp = await _http.SendAsync(req).ConfigureAwait(false);
                 sw.Stop();
@@ -706,18 +674,10 @@ namespace V2HHTMiddleware.Controllers.HHT
                 sw.Stop();
                 return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
-
-            // Wrap plain-text response in JSON if it isn't already
-            // (JsonObjectRequest on the app expects JSON)
-            string jsonResp = respBody;
-            if (!string.IsNullOrEmpty(respBody) && !respBody.TrimStart().StartsWith("{") && !respBody.TrimStart().StartsWith("["))
-                jsonResp = Newtonsoft.Json.JsonConvert.SerializeObject(new { response = respBody });
-
-            var result = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            result.Content = new StringContent(jsonResp ?? "{}", Encoding.UTF8, "application/json");
-
-            // Record in stats (same as Proxy)
+            string jresp = Newtonsoft.Json.JsonConvert.SerializeObject(new { response = respBody ?? "" });
             LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
+            var result = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            result.Content = new StringContent(jresp, Encoding.UTF8, "application/json");
             return result;
         }
 

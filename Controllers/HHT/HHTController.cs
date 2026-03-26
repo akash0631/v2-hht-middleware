@@ -684,38 +684,6 @@ namespace V2HHTMiddleware.Controllers.HHT
             return obj.ToString(Newtonsoft.Json.Formatting.None);
         }
 
-        // Translate Java ValueXMW response to SAP JSON structure the v12 app expects
-        private string TranslateToSapJson(string bapi, string rawResp)
-        {
-            if (string.IsNullOrEmpty(rawResp) || rawResp == "Response:null")
-            {
-                return "{"EX_RETURN":{"TYPE":"E","MESSAGE":"No response from SAP"}}";
-            }
-
-            // Strip "Response:" prefix if present
-            string payload = rawResp.StartsWith("Response:") ? rawResp.Substring(9) : rawResp;
-            string[] parts = payload.TrimEnd('<', 'e', 'o', 'l', '>').Split('#');
-            string status = parts.Length > 0 ? parts[0].Trim() : "0";
-
-            if (status == "0" || status == "")
-            {
-                // Auth/operation failure
-                return "{"EX_RETURN":{"TYPE":"E","MESSAGE":"Operation failed. Please check credentials or SAP access."}}";
-            }
-
-            if (bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase))
-            {
-                // Login success: Response:1#WERKS#GROUP#<eol>
-                string werks = parts.Length > 1 ? parts[1].Trim() : "";
-                string group = parts.Length > 2 ? parts[2].Trim() : "";
-                return "{"EX_RETURN":{"TYPE":"S","MESSAGE":""},"EX_WERKS":""
-                       + werks + "","EX_GROUP":"" + group + ""}";
-            }
-
-            // Generic success: wrap in EX_RETURN success
-            return "{"EX_RETURN":{"TYPE":"S","MESSAGE":"","ET_DATA":[{"RESPONSE":""
-                   + rawResp.Replace("\", "\\").Replace(""", "\"") + ""}]}}";
-        }
 
 
         private class OpcodeStats

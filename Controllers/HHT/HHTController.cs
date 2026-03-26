@@ -568,43 +568,64 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         private async Task<HttpResponseMessage> ProxyNoAcl()
         {
+            // v12+ app sends: POST /noacljsonrfcadaptor?bapiname=ZWM_RFC_NAME
+            // Body: {"bapiname":"ZWM_RFC_NAME","IM_PARAM1":"val1","IM_PARAM2":"val2",...}
+            //
+            // Strategy: translate to old opcode format and forward to Java /ValueXMW
+            // which we know works. The body format Java expects: "opcode#p1#p2#...#<eol>"
+            //
+            // Mapping rules:
+            //   ZWM_USER_AUTHORITY_CHECK -> scnrec  (login — Java internal name)
+            //   Everything else          -> bapiname.ToLower()  (Java uses lowercase RFC names)
+            //
+            // IM_ parameter order matters — we preserve JSON insertion order.
+
             string javaBase = GetJavaBase();
             if (javaBase == null)
-                return LogAndReturn("noAcl", 0, "E#HC tunnel down", false, "?");
+                return LogAndReturn("noacl", 0, "E#HC tunnel down", false, "?");
+
             string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
-            string opcode  = "";
-            var fields = new System.Collections.Generic.Dictionary<string,string>(System.StringComparer.OrdinalIgnoreCase);
+
+            // Parse JSON body
+            string bapi  = "";
+            var    imVals = new System.Collections.Generic.List<string>();
             try
             {
-                var j = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
-                foreach (var p in j.Properties()) fields[p.Name] = p.Value?.ToString() ?? "";
+                var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                bapi = jobj["bapiname"]?.ToString() ?? "";
+                foreach (var kv in jobj)
+                    if (kv.Key.StartsWith("IM_", System.StringComparison.OrdinalIgnoreCase))
+                        imVals.Add(kv.Value?.ToString() ?? "");
             }
             catch { }
-            var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
-            opcode = fields.ContainsKey("bapiname") ? fields["bapiname"] : (qs["bapiname"] ?? "");
-            if (string.IsNullOrEmpty(opcode))
-                return LogAndReturn("noAcl", 0, "E#missing bapiname", false, "?");
-            var map = new System.Collections.Generic.Dictionary<string,string>(System.StringComparer.OrdinalIgnoreCase)
+
+            // Also check query string
+            if (string.IsNullOrEmpty(bapi))
             {
-                { "IM_USERID",   "Huser"    },
-                { "IM_PASSWORD", "Hpassword" },
-                { "IM_PLANT",    "Hplant"   },
-                { "IM_LGORT",    "Hlgort"   },
-            };
-            var sb = new System.Text.StringBuilder("opcode=").Append(Uri.EscapeDataString(opcode));
-            foreach (var kv in fields)
-            {
-                if (kv.Key.Equals("bapiname", System.StringComparison.OrdinalIgnoreCase)) continue;
-                string pname = map.ContainsKey(kv.Key) ? map[kv.Key] : kv.Key;
-                sb.Append('&').Append(Uri.EscapeDataString(pname)).Append('=').Append(Uri.EscapeDataString(kv.Value));
+                var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query ?? "");
+                bapi = qs["bapiname"] ?? "";
             }
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (string.IsNullOrEmpty(bapi))
+                return LogAndReturn("noacl", 0, "E#missing bapiname", false, "?");
+
+            // Map bapiname to Java opcode
+            string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
+                            ? "scnrec"
+                            : bapi.ToLower();
+
+            // Build body: "opcode#val1#val2#...#<eol>"
+            var sb = new System.Text.StringBuilder(opcode);
+            foreach (var v in imVals)
+                sb.Append("#").Append(v);
+            sb.Append("#<eol>");
+
+            var sw = Stopwatch.StartNew();
             string respBody; bool sapOk;
             try
             {
                 var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
                 {
-                    Content = new StringContent(sb.ToString(), Encoding.UTF8, "text/plain")
+                    Content = new StringContent(sb.ToString(), Encoding.UTF8, "application/json")
                 };
                 var resp = await _http.SendAsync(req).ConfigureAwait(false);
                 sw.Stop();
@@ -616,11 +637,14 @@ namespace V2HHTMiddleware.Controllers.HHT
                 sw.Stop();
                 return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
             }
-            string jresp = Newtonsoft.Json.JsonConvert.SerializeObject(new { response = respBody ?? "" });
+
+            // Return JSON so v12 app (which uses JsonObjectRequest) can parse it
+            // Wrap raw response in JSON: {"response":"..."}
+            string jsonResp = "{"response":" + Newtonsoft.Json.JsonConvert.SerializeObject(respBody ?? "") + "}";
             LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
-            var result = Request.CreateResponse(System.Net.HttpStatusCode.OK);
-            result.Content = new StringContent(jresp, Encoding.UTF8, "application/json");
-            return result;
+            var httpResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            httpResp.Content = new StringContent(jsonResp, Encoding.UTF8, "application/json");
+            return httpResp;
         }
 
 

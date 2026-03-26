@@ -121,6 +121,12 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
+        // ── noacljsonrfcadaptor — new app format (v12+) ────────────────────
+        [HttpPost, Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJson() => Proxy();
+
+        [HttpGet, Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJsonGet() => Proxy();
 
         [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
         public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();

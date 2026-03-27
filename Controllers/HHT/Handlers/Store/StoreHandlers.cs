@@ -73,7 +73,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     }
     public class ValidateBinHandler : HHTBaseHandler {
         readonly bool _qa; public ValidateBinHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_GET_BIN_DETAILS");f.SetValue("IM_LGNUM",P(1));f.SetValue("IM_LGPLA",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Bin existence is stable for the duration of a shift
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetValidateBin(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_GET_BIN_DETAILS");f.SetValue("IM_LGNUM",P(1));f.SetValue("IM_LGPLA",P(2));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetValidateBin(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class StoreBinListValidationHandler : HHTBaseHandler {
         readonly bool _qa; public StoreBinListValidationHandler(bool qa){_qa=qa;}
@@ -359,11 +367,27 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // ET_BIN fields verified: LGPLA, LGNUM, LGTYP (IT_BIN is the import, ET_BIN is output)
     public class ValidateStockTakeIdHandler : HHTBaseHandler {
         readonly bool _qa; public ValidateStockTakeIdHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STORE_VALDIATE_STID");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_STID",P(2));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_BIN"),"LGPLA","LGNUM","LGTYP");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // STID validation result is stable once assigned
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetValidateStid(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STORE_VALDIATE_STID");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_STID",P(2));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+Tbl(f.GetTable("ET_BIN"),"LGPLA","LGNUM","LGTYP");
+            V2HHTMiddleware.Infrastructure.HHTCache.SetValidateStid(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ValidateGandolaMcHandler : HHTBaseHandler {
         readonly bool _qa; public ValidateGandolaMcHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STORE_VALDIATE_GANDOLA");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_GANDOLA",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Gondola location mapping is static during a shift
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetValidateGandola(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STORE_VALDIATE_GANDOLA");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_GANDOLA",P(2));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetValidateGandola(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     // ET_EAN_DATA fields also include MEINH, UMREN (more complete EAN data)
     public class GetEanStidMcHandler : HHTBaseHandler {
@@ -428,7 +452,7 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // IT_HUSAVE fields verified: HU,ITEM_NO,ARTICLE,PLANT,STGE_LOC,SCAN_QTY,REM_QTY,BIN,LGNUM
     public class HuPut31SaveHandler : HHTBaseHandler {
         readonly bool _qa; public HuPut31SaveHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_HUPUT31_SAVE");f.SetValue("IM_COMPLETE_FLAG","X");f.SetValue("IM_PICNR",P(0).Contains("#")?P(0).Split('#')[1]:P(1));var p=P(1).Split(',');var t=f.GetTable("IT_HUSAVE");for(int i=1;i+8<p.Length;i+=9){t.Append();t.SetValue("HU",p[i]);t.SetValue("ITEM_NO",p[i+1]);t.SetValue("ARTICLE",p[i+2]);t.SetValue("PLANT",p[i+3]);t.SetValue("STGE_LOC",p[i+4]);t.SetValue("SCAN_QTY",p[i+5]);t.SetValue("REM_QTY",p[i+6]);t.SetValue("BIN",p[i+7]);t.SetValue("LGNUM",p[i+8]);}f.Invoke(d);var msg=f.GetString("EX_MESSAGE");return"S#"+msg;}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_HUPUT31_SAVE");f.SetValue("IM_COMPLETE_FLAG","X");f.SetValue("IM_PICNR",P(1)); // P(1) is always used (P(0)="#" check was dead code)var p=P(1).Split(',');var t=f.GetTable("IT_HUSAVE");for(int i=1;i+8<p.Length;i+=9){t.Append();t.SetValue("HU",p[i]);t.SetValue("ITEM_NO",p[i+1]);t.SetValue("ARTICLE",p[i+2]);t.SetValue("PLANT",p[i+3]);t.SetValue("STGE_LOC",p[i+4]);t.SetValue("SCAN_QTY",p[i+5]);t.SetValue("REM_QTY",p[i+6]);t.SetValue("BIN",p[i+7]);t.SetValue("LGNUM",p[i+8]);}f.Invoke(d);var msg=f.GetString("EX_MESSAGE");return"S#"+msg;}catch(System.Exception e){return Err(e.Message);}}
     }
 
     // ── MISC ──────────────────────────────────────────────────────────────────
@@ -440,11 +464,27 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // ET_BINS: LGPLA,LGNUM,LGTYP,LOCKED; ET_CRATE: EXIDV
     public class GetGrcBinsHandler : HHTBaseHandler {
         readonly bool _qa; public GetGrcBinsHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_GET_GRC_BINS");f.SetValue("IM_MBLNR",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_BINS"),"LGPLA","LGNUM","LGTYP","LOCKED")+"!"+Tbl(f.GetTable("ET_CRATE"),"CRATE");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Bins assigned to a GR document don't change during putaway
+            string ck=(_qa?"qa:":"")+P(1);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetGrcBins(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_GET_GRC_BINS");f.SetValue("IM_MBLNR",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+Tbl(f.GetTable("ET_BINS"),"LGPLA","LGNUM","LGTYP","LOCKED")+"!"+Tbl(f.GetTable("ET_CRATE"),"CRATE");
+            V2HHTMiddleware.Infrastructure.HHTCache.SetGrcBins(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ValidateDcSlocHandler : HHTBaseHandler {
         readonly bool _qa; public ValidateDcSlocHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_VALIDATE_DC_SLOC");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_LGORT",P(2));f.SetValue("IM_V11",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // DC storage location is master data — static during shift
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2)+":"+P(3);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetDcSloc(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_VALIDATE_DC_SLOC");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_LGORT",P(2));f.SetValue("IM_V11",P(3));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetDcSloc(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     // FIX: only IM_EAN11 input (not IM_WERKS) — confirmed from class
     public class RfcStoreEanDataStkHandler : HHTBaseHandler {
@@ -453,7 +493,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     }
     public class RfcValidateCrateHandler : HHTBaseHandler {
         readonly bool _qa; public RfcValidateCrateHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_VALIDATE_CRATE");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_CRATE",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Crate validity — registered at inward, stable for 2min
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetCrateVal(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_VALIDATE_CRATE");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_CRATE",P(2));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetCrateVal(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     // FIX: ET_MSEG_DATA has MATNR,MENGE,ERFMG (no LGPLA). Also EX_LGNUM is now returned.
     public class GetGrDetailsHandler : HHTBaseHandler {

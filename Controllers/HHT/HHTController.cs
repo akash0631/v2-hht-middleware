@@ -38,6 +38,10 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static readonly ConcurrentQueue<CallLog> _ring = new ConcurrentQueue<CallLog>();
         private const int RING_MAX = 1000;
 
+        // Active device sessions: key=userId, value=last seen info
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession> _sessions
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession>(StringComparer.OrdinalIgnoreCase);
+
         // ── Per-opcode stats — loaded from disk on startup, flushed every 60s ──
         private static readonly ConcurrentDictionary<string, OpcodeStats> _opcodeStats
             = new ConcurrentDictionary<string, OpcodeStats>(StringComparer.OrdinalIgnoreCase);
@@ -238,14 +242,37 @@ namespace V2HHTMiddleware.Controllers.HHT
             sb.AppendLine($"{"Timestamp",-20} {"Opcode",-35} {"Store",-6} {"Ms",6} {"SAP_OK",6} {"Resp",35}");
             sb.AppendLine(new string('-', 110));
             var recent = _ring.ToArray();
-            int start  = Math.Max(0, recent.Length - 20);
-            for (int i = recent.Length - 1; i >= start; i--)
+            int ringCount = Math.Min(recent.Length, 500);
+            sb.AppendLine($"{"Timestamp",-20} {"User",-8} {"Opcode",-35} {"Store",-6} {"Ms",6} {"OK",4} {"Resp",40}");
+            sb.AppendLine(new string('-', 125));
+            for (int i = recent.Length - 1; i >= recent.Length - ringCount; i--)
             {
                 var c = recent[i];
-                sb.AppendLine($"{c.Timestamp:HH:mm:ss.fff}         {c.Opcode,-35} {c.Store,-6} {c.ElapsedMs,6} {(c.SapOk?"✅":"❌"),6}  {c.ResponseSnippet,-35}");
+                string uid = string.IsNullOrEmpty(c.UserId) ? "-" : c.UserId;
+                sb.AppendLine($"{c.Timestamp:HH:mm:ss.fff,-20} {uid,-8} {c.Opcode,-35} {c.Store,-6} {c.ElapsedMs,6} {(c.SapOk?"✅":"❌"),4}  {c.ResponseSnippet,-40}");
             }
 
             return Txt(sb.ToString());
+        }
+
+        // ── Active device sessions ────────────────────────────────────────────
+        [HttpGet, Route("sessions")]
+        public HttpResponseMessage Sessions()
+        {
+            var cutoff = DateTime.UtcNow.AddMinutes(-30);
+            var active = _sessions.Values
+                .Where(s => s.LastSeen >= cutoff)
+                .OrderByDescending(s => s.LastSeen)
+                .Select(s => new {
+                    user_id    = s.UserId,
+                    store      = s.Store,
+                    last_opcode= s.LastOpcode,
+                    last_seen  = s.LastSeen.ToString("HH:mm:ss"),
+                    last_seen_mins = (int)(DateTime.UtcNow - s.LastSeen).TotalMinutes,
+                    call_count = s.CallCount,
+                    active     = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
+                });
+            return Json(new { sessions = active, total = active.Count() });
         }
 
         // ── Per-opcode drill-down ──────────────────────────────────────────────
@@ -320,9 +347,10 @@ namespace V2HHTMiddleware.Controllers.HHT
             if (body.TrimStart().StartsWith("{"))
                 return await ProxyNoAcl(body).ConfigureAwait(false);
 
-            string opcode = ExtractOpcode(body);
-            string store  = ExtractStore(body);
-            var    sw     = Stopwatch.StartNew();
+            string opcode  = ExtractOpcode(body);
+            string store   = ExtractStore(body);
+            string userId  = ExtractUserId(body);
+            var    sw      = Stopwatch.StartNew();
             string respBody;
             bool   sapOk;
 
@@ -354,14 +382,14 @@ namespace V2HHTMiddleware.Controllers.HHT
                 sapOk    = false;
             }
 
-            return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store);
+            return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store, userId);
         }
 
         // ═══════════════════════════════════════════════════════════════════════
         // LOGGING
         // ═══════════════════════════════════════════════════════════════════════
 
-        private HttpResponseMessage LogAndReturn(string opcode, long ms, string resp, bool ok, string store)
+        private HttpResponseMessage LogAndReturn(string opcode, long ms, string resp, bool ok, string store, string userId = "")
         {
             if (opcode != null)
             {
@@ -371,6 +399,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                     Timestamp       = DateTime.UtcNow,
                     Opcode          = opcode,
                     Store           = store ?? "?",
+                    UserId          = userId ?? "",
                     ElapsedMs       = ms,
                     SapOk           = ok,
                     ResponseSnippet = (resp ?? "").Length > 60
@@ -378,6 +407,14 @@ namespace V2HHTMiddleware.Controllers.HHT
                 };
                 _ring.Enqueue(entry);
                 while (_ring.Count > RING_MAX) _ring.TryDequeue(out _);
+
+                // Update active sessions
+                if (!string.IsNullOrEmpty(userId))
+                {
+                    _sessions.AddOrUpdate(userId,
+                        _ => new DeviceSession { UserId=userId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
+                        (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; return s; });
+                }
 
                 // Opcode stats (persisted)
                 _opcodeStats.AddOrUpdate(opcode,
@@ -527,10 +564,46 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static string ExtractStore(string body)
         {
             if (string.IsNullOrEmpty(body)) return "?";
+            // JSON body (v12 app): {"bapiname":"RFC","IM_WERKS":"DH24",...}
+            if (body.TrimStart().StartsWith("{"))
+            {
+                try {
+                    var j = Newtonsoft.Json.Linq.JObject.Parse(body);
+                    var werks = j["IM_WERKS"]?.ToString() ?? j["im_werks"]?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(werks)) return werks;
+                    // Fallback: any field that looks like a plant code
+                    foreach (var kv in j)
+                        if (kv.Value?.ToString().Length >= 3 && kv.Value.ToString().Length <= 6
+                            && (kv.Value.ToString().StartsWith("H") || kv.Value.ToString().StartsWith("DH")))
+                            return kv.Value.ToString();
+                } catch { }
+                return "?";
+            }
+            // Legacy body: opcode#user#password#store#...
             var parts = body.Split('#');
             if (parts.Length >= 4 && parts[0].Equals("scnrec", StringComparison.OrdinalIgnoreCase)) return parts[3];
-            if (parts.Length >= 2 && parts[1].Length >= 4 && parts[1].Length <= 6) return parts[1];
+            if (parts.Length >= 2 && parts[1].Length >= 3 && parts[1].Length <= 6
+                && (parts[1].StartsWith("H") || parts[1].StartsWith("DH") || parts[1].StartsWith("h")))
+                return parts[1];
             return "?";
+        }
+
+        private static string ExtractUserId(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return "";
+            // JSON body: {"bapiname":"RFC","im_userid":"250","IM_USERID":"250",...}
+            if (body.TrimStart().StartsWith("{"))
+            {
+                try {
+                    var j = Newtonsoft.Json.Linq.JObject.Parse(body);
+                    return j["im_userid"]?.ToString() ?? j["IM_USERID"]?.ToString()
+                        ?? j["im_password"]?.ToString() ?? j["IM_PASSWORD"]?.ToString() ?? "";
+                } catch { }
+                return "";
+            }
+            // Legacy: opcode#user#password#store → parts[1]=user
+            var parts = body.Split('#');
+            return parts.Length >= 2 ? parts[1] : "";
         }
 
         // Infrastructure errors only (tunnel/proxy failures) — SAP business errors are OK
@@ -559,9 +632,19 @@ namespace V2HHTMiddleware.Controllers.HHT
             public DateTime Timestamp       { get; set; }
             public string   Opcode          { get; set; }
             public string   Store           { get; set; }
+            public string   UserId          { get; set; }
             public long     ElapsedMs       { get; set; }
             public bool     SapOk           { get; set; }
             public string   ResponseSnippet { get; set; }
+        }
+
+        class DeviceSession
+        {
+            public string   UserId      { get; set; }
+            public string   Store       { get; set; }
+            public string   LastOpcode  { get; set; }
+            public DateTime LastSeen    { get; set; }
+            public int      CallCount   { get; set; }
         }
 
         public class PersistedStats

@@ -844,6 +844,18 @@ namespace V2HHTMiddleware.Controllers.HHT
             string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
                             ? "scnrec" : bapi.ToLower();
 
+            // ── Response cache check — same logic as Proxy() ──────────────────
+            // CACHEABLE set covers read-only opcodes (storegetbin_v2, packgingmaterial, etc.)
+            // Cache key: opcode|store (store extracted from IM_WERKS above)
+            if (TryGetCache(opcode, store, out string noaclCached))
+            {
+                LogAndReturn(opcode, 0, noaclCached, true, store);
+                var cachedResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                cachedResp.Content = new StringContent(noaclCached, Encoding.UTF8, "application/json");
+                cachedResp.Headers.Add("X-Cache", "HIT");
+                return cachedResp;
+            }
+
             var sw = Stopwatch.StartNew();
 
             // ── PATH A: Java /noacljsonrfcadaptor (native SAP JSON response) ────

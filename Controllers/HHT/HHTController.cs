@@ -80,6 +80,39 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession> _sessions
             = new System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession>(StringComparer.OrdinalIgnoreCase);
 
+        // ── In-flight deduplication for idempotent-risky write RFCs ────────────
+        // Prevents double-tap creating two HUs when ZWM_CREATE_HU_AND_ASSIGN_TVS
+        // is slow (5-17s) and the device operator taps again.
+        // Key = bapiname|IM_EXIDV — second caller awaits the first result.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.Tasks.TaskCompletionSource<string>>
+            _inFlight = new System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.Tasks.TaskCompletionSource<string>>(StringComparer.OrdinalIgnoreCase);
+
+        // Write RFCs where duplicate execution causes real damage
+        private static readonly System.Collections.Generic.HashSet<string> DEDUP_RFCS
+            = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "ZWM_CREATE_HU_AND_ASSIGN_TVS",
+            "ZWM_CREATE_HU_AND_ASSIGN",
+            "ZWM_DC_HUGRT_SAVE",
+            "ZWM_INV_GRC_HUB_SAVE"
+        };
+
+        // Per-RFC timeout buckets (seconds)
+        private static int RfcTimeout(string bapi)
+        {
+            if (string.IsNullOrEmpty(bapi)) return 35;
+            string u = bapi.ToUpperInvariant();
+            // Heavy creates — HU creation involves multiple SAP steps
+            if (u.Contains("CREATE_HU") || u.Contains("INV_GRC_HUB") || u.Contains("DELIVERY_GET_DETAILS_PLP2"))
+                return 50;
+            // Write / save / post operations
+            if (u.Contains("_SAVE") || u.Contains("_POST") || u.Contains("_PICKING")
+                || u.Contains("_PUT") || u.Contains("_GRT_S") || u.Contains("_MOVEMENT"))
+                return 35;
+            // Default reads — validate calls, GET details
+            return 15;
+        }
+
         // ── Per-opcode stats — loaded from disk on startup, flushed every 60s ──
         private static readonly ConcurrentDictionary<string, OpcodeStats> _opcodeStats
             = new ConcurrentDictionary<string, OpcodeStats>(StringComparer.OrdinalIgnoreCase);
@@ -456,6 +489,28 @@ namespace V2HHTMiddleware.Controllers.HHT
                 sapOk    = false;
             }
 
+            // ── SAP lock retry (Proxy/legacy path) ───────────────────────────────
+            // Transient object-lock errors — retry once after 600ms.
+            // Only for non-write opcodes to avoid creating duplicates.
+            bool _isWrite = opcode != null && (
+                opcode.Contains("save") || opcode.Contains("post") || opcode.Contains("create") ||
+                opcode.Contains("del_pick") || opcode.Contains("movement"));
+            if (!sapOk && !_isWrite && respBody != null &&
+                (respBody.IndexOf("locked", System.StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                System.Threading.Thread.Sleep(600);
+                try
+                {
+                    var retReq = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, GetJavaBase() + "/ValueXMW")
+                        { Content = new System.Net.Http.StringContent(body, Encoding.UTF8, "text/plain") };
+                    var retResp = _http.SendAsync(retReq).GetAwaiter().GetResult();
+                    var retBody = retResp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    if (!string.IsNullOrEmpty(retBody) && !retBody.StartsWith("E#"))
+                    { respBody = retBody; sapOk = true; }
+                }
+                catch { /* retry failed — return original error */ }
+            }
+
             // Cache successful responses for cacheable opcodes
             if (sapOk) SetCache(opcode, store, respBody);
 
@@ -683,6 +738,16 @@ namespace V2HHTMiddleware.Controllers.HHT
             return parts.Length >= 2 ? parts[1] : "";
         }
 
+        // ── Task.TimeoutAfter extension ──────────────────────────────────────
+        private static async System.Threading.Tasks.Task<T> TimeoutAfter<T>(
+            this System.Threading.Tasks.Task<T> task, TimeSpan timeout)
+        {
+            var delay = System.Threading.Tasks.Task.Delay(timeout);
+            var done  = await System.Threading.Tasks.Task.WhenAny(task, delay).ConfigureAwait(false);
+            if (done == delay) throw new System.OperationCanceledException("Dedup wait timed out");
+            return await task.ConfigureAwait(false);
+        }
+
         // Infrastructure errors only (tunnel/proxy failures) — SAP business errors are OK
         private static bool IsInfraOk(string resp)
         {
@@ -786,9 +851,61 @@ namespace V2HHTMiddleware.Controllers.HHT
                 var noaclContent = new StringContent(rawBody, Encoding.UTF8);
                 noaclContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
 
-                var noaclReq  = new HttpRequestMessage(HttpMethod.Post, noaclUrl) { Content = noaclContent };
-                var noaclResp = await _http.SendAsync(noaclReq).ConfigureAwait(false);
-                string noaclRaw = await noaclResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                // ── In-flight deduplication for risky write RFCs ──────────────
+                // If two requests for the same HU creation arrive simultaneously,
+                // the second waits for the first result instead of hitting SAP twice.
+                string dedupKey = null;
+                if (DEDUP_RFCS.Contains(bapi))
+                {
+                    var jobj2 = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                    var exidv  = jobj2["IM_EXIDV"]?.ToString() ?? jobj2["im_exidv"]?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(exidv))
+                        dedupKey = bapi.ToUpperInvariant() + "|" + exidv;
+                }
+
+                if (dedupKey != null)
+                {
+                    var tcs = new System.Threading.Tasks.TaskCompletionSource<string>();
+                    if (!_inFlight.TryAdd(dedupKey, tcs))
+                    {
+                        // Another request for same HU is in-flight — wait for its result
+                        if (_inFlight.TryGetValue(dedupKey, out var existing))
+                        {
+                            try
+                            {
+                                string dedupResult = await existing.Task
+                                    .TimeoutAfter(TimeSpan.FromSeconds(55)).ConfigureAwait(false);
+                                sw.Stop();
+                                LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, dedupResult, true, store);
+                                var dedupResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                                dedupResp.Content = new StringContent(dedupResult, Encoding.UTF8, "application/json");
+                                dedupResp.Headers.Add("X-Dedup", "true");
+                                return dedupResp;
+                            }
+                            catch { /* timed out waiting — fall through to SAP */ }
+                        }
+                    }
+                }
+
+                // ── Per-RFC timeout — not flat 55s for everything ─────────────
+                int timeoutSec = RfcTimeout(bapi);
+                string noaclRaw;
+                try
+                {
+                    using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec)))
+                    {
+                        var noaclReq  = new HttpRequestMessage(HttpMethod.Post, noaclUrl) { Content = noaclContent };
+                        var noaclResp = await _http.SendAsync(noaclReq, cts.Token).ConfigureAwait(false);
+                        noaclRaw = await noaclResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    }
+                }
+                catch (System.OperationCanceledException)
+                {
+                    noaclRaw = $"E#RFC timeout after {timeoutSec}s — SAP did not respond";
+                    if (dedupKey != null && _inFlight.TryRemove(dedupKey, out var tcs2)) tcs2.TrySetResult(noaclRaw);
+                    sw.Stop();
+                    return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, false, store);
+                }
 
                 // Java accepted the request if response is valid JSON (not the content-type error string)
                 if (!string.IsNullOrEmpty(noaclRaw) &&
@@ -800,6 +917,8 @@ namespace V2HHTMiddleware.Controllers.HHT
                     bool ok = IsInfraOk(noaclRaw);
                     LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
                     if (ok) SetCache(opcode, "?", noaclRaw);
+                    // Resolve any waiters on this dedup key
+                    if (dedupKey != null && _inFlight.TryRemove(dedupKey, out var tcsOk)) tcsOk.TrySetResult(noaclRaw);
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                     nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
                     nativeResp.Headers.Add("X-Cache", "MISS");

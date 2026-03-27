@@ -834,6 +834,13 @@ namespace V2HHTMiddleware.Controllers.HHT
             var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "");
             if (string.IsNullOrEmpty(bapi)) bapi = qs["bapiname"] ?? "noacl";
 
+            // Extract store (WERKS) from JSON body for logging
+            string store = "?";
+            try {
+                var jWerks = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                store = jWerks["IM_WERKS"]?.ToString() ?? jWerks["im_werks"]?.ToString() ?? "?";
+            } catch { }
+
             string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
                             ? "scnrec" : bapi.ToLower();
 

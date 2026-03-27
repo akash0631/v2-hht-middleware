@@ -322,7 +322,7 @@ namespace V2HHTMiddleware.Controllers.HHT
         [HttpGet, Route("sessions")]
         public HttpResponseMessage Sessions()
         {
-            var cutoff = DateTime.UtcNow.AddMinutes(-30);
+            var cutoff = DateTime.UtcNow.AddMinutes(-60);
             var active = _sessions.Values
                 .Where(s => s.LastSeen >= cutoff)
                 .OrderByDescending(s => s.LastSeen)
@@ -485,11 +485,14 @@ namespace V2HHTMiddleware.Controllers.HHT
                 _ring.Enqueue(entry);
                 while (_ring.Count > RING_MAX) _ring.TryDequeue(out _);
 
-                // Update active sessions
-                if (!string.IsNullOrEmpty(userId))
+                // Update active sessions — track by userId when available, else by store
+                var sessionKey = !string.IsNullOrEmpty(userId) ? userId
+                                : !string.IsNullOrEmpty(store) && store != "?" ? "store:" + store
+                                : null;
+                if (sessionKey != null)
                 {
-                    _sessions.AddOrUpdate(userId,
-                        _ => new DeviceSession { UserId=userId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
+                    _sessions.AddOrUpdate(sessionKey,
+                        _ => new DeviceSession { UserId = !string.IsNullOrEmpty(userId) ? userId : store, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
                         (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; return s; });
                 }
 

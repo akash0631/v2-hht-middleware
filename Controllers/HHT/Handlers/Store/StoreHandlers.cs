@@ -452,7 +452,7 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // IT_HUSAVE fields verified: HU,ITEM_NO,ARTICLE,PLANT,STGE_LOC,SCAN_QTY,REM_QTY,BIN,LGNUM
     public class HuPut31SaveHandler : HHTBaseHandler {
         readonly bool _qa; public HuPut31SaveHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_HUPUT31_SAVE");f.SetValue("IM_COMPLETE_FLAG","X");f.SetValue("IM_PICNR",P(1)); // P(1) is always used (P(0)="#" check was dead code)var p=P(1).Split(',');var t=f.GetTable("IT_HUSAVE");for(int i=1;i+8<p.Length;i+=9){t.Append();t.SetValue("HU",p[i]);t.SetValue("ITEM_NO",p[i+1]);t.SetValue("ARTICLE",p[i+2]);t.SetValue("PLANT",p[i+3]);t.SetValue("STGE_LOC",p[i+4]);t.SetValue("SCAN_QTY",p[i+5]);t.SetValue("REM_QTY",p[i+6]);t.SetValue("BIN",p[i+7]);t.SetValue("LGNUM",p[i+8]);}f.Invoke(d);var msg=f.GetString("EX_MESSAGE");return"S#"+msg;}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_HUPUT31_SAVE");f.SetValue("IM_COMPLETE_FLAG","X");f.SetValue("IM_PICNR",P(1)); var p=P(1).Split(','); // P(1) always correct; old P(0).Contains("#") was dead codevar t=f.GetTable("IT_HUSAVE");for(int i=1;i+8<p.Length;i+=9){t.Append();t.SetValue("HU",p[i]);t.SetValue("ITEM_NO",p[i+1]);t.SetValue("ARTICLE",p[i+2]);t.SetValue("PLANT",p[i+3]);t.SetValue("STGE_LOC",p[i+4]);t.SetValue("SCAN_QTY",p[i+5]);t.SetValue("REM_QTY",p[i+6]);t.SetValue("BIN",p[i+7]);t.SetValue("LGNUM",p[i+8]);}f.Invoke(d);var msg=f.GetString("EX_MESSAGE");return"S#"+msg;}catch(System.Exception e){return Err(e.Message);}}
     }
 
     // ── MISC ──────────────────────────────────────────────────────────────────

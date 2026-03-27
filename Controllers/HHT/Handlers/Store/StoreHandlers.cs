@@ -279,15 +279,36 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.Store
     // ET_LQUA fields verified: MATERIAL(=MATNR), WM_NO, PLANT, AVL_STOCK, OPEN_STOCK, SCAN_QTY, MEINH, UMREN, PICK_QTY
     public class StoreGetMatFromEanHandler : HHTBaseHandler {
         readonly bool _qa; public StoreGetMatFromEanHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_MAT_FROM_EAN");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_EAN",P(2));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+EanData(f.GetTable("ET_EAN_DATA"))+"!"+Tbl(f.GetTable("ET_LQUA"),"MATERIAL","WM_NO","PLANT","AVL_STOCK","OPEN_STOCK","SCAN_QTY","MEINH","UMREN","UMREZ","PICK_QTY");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // ET_LQUA has live stock — always fresh. EAN mapping is static.
+            string werks=P(1),ean=P(2);
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_MAT_FROM_EAN");f.SetValue("IM_WERKS",werks);f.SetValue("IM_EAN",ean);f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var eanPart="S#"+EanData(f.GetTable("ET_EAN_DATA"));
+            V2HHTMiddleware.Infrastructure.HHTCache.SetEan((_qa?"qa:":"")+werks+":"+ean, eanPart);
+            return eanPart+"!"+Tbl(f.GetTable("ET_LQUA"),"MATERIAL","WM_NO","PLANT","AVL_STOCK","OPEN_STOCK","SCAN_QTY","MEINH","UMREN","UMREZ","PICK_QTY");}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ValidateStoreEanHandler : HHTBaseHandler {
         readonly bool _qa; public ValidateStoreEanHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STORE_EAN_DATA");f.SetValue("IM_EAN11",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+EanData(f.GetTable("ET_EAN_DATA"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // EAN→material mapping is static — cache 30 min
+            string ean=P(1), ck=(_qa?"qa:":"")+ean;
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetEan(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STORE_EAN_DATA");f.SetValue("IM_EAN11",ean);f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+EanData(f.GetTable("ET_EAN_DATA"));
+            V2HHTMiddleware.Infrastructure.HHTCache.SetEan(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ValidateStoreEanV2Handler : HHTBaseHandler {
         readonly bool _qa; public ValidateStoreEanV2Handler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_MAT_FROM_EAN_V2");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_EAN",P(2));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+EanData(f.GetTable("ET_EAN_DATA"))+"!"+Tbl(f.GetTable("ET_LQUA"),"MATERIAL","WM_NO","PLANT","AVL_STOCK","OPEN_STOCK","SCAN_QTY","MEINH","UMREN","UMREZ","PICK_QTY");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // ET_LQUA has live stock data — don't cache. Only cache EAN portion.
+            string werks=P(1),ean=P(2),ck=(_qa?"qa:":"")+werks+":"+ean;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_STORE_GET_MAT_FROM_EAN_V2");f.SetValue("IM_WERKS",werks);f.SetValue("IM_EAN",ean);f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            // Cache just the EAN mapping (static), always fetch fresh stock
+            var eanPart="S#"+EanData(f.GetTable("ET_EAN_DATA"));
+            V2HHTMiddleware.Infrastructure.HHTCache.SetEan(ck,eanPart);
+            return eanPart+"!"+Tbl(f.GetTable("ET_LQUA"),"MATERIAL","WM_NO","PLANT","AVL_STOCK","OPEN_STOCK","SCAN_QTY","MEINH","UMREN","UMREZ","PICK_QTY");}catch(System.Exception e){return Err(e.Message);}}
     }
     public class AppArticleDetailsHandler : HHTBaseHandler {
         readonly bool _qa; public AppArticleDetailsHandler(bool qa){_qa=qa;}

@@ -272,7 +272,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                     call_count     = s.CallCount,
                     active         = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
                 }).ToList();
-            return Json(new { sessions = active, total = active.Count });
+            return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new { sessions = active, total = active.Count }));
         }
 
         // ── Per-opcode drill-down ──────────────────────────────────────────────

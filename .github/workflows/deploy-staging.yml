@@ -1,0 +1,80 @@
+name: Deploy to staging slot (opt/performance)
+on:
+  push:
+    branches: [ opt/performance ]
+  workflow_dispatch:
+
+jobs:
+  build-deploy-staging:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - uses: NuGet/setup-nuget@v2
+        with: { nuget-version: '6.x' }
+
+      - name: NuGet Restore
+        run: nuget restore V2HHTMiddleware.sln -NonInteractive
+
+      - name: Build
+        shell: powershell
+        run: |
+          msbuild V2HHTMiddleware.sln `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:VisualStudioVersion=17.0 `
+            /m /v:minimal
+
+      - name: Package for Azure
+        shell: powershell
+        run: |
+          $binDir = Get-ChildItem -Path "." -Recurse -Filter "V2HHTMiddleware.dll" |
+            Where-Object { $_.DirectoryName -notmatch "obj" } |
+            Select-Object -First 1 -ExpandProperty DirectoryName
+          Write-Host "Build output: $binDir"
+          $deployDir = "${{ github.workspace }}\deploy_content"
+          New-Item -ItemType Directory -Force -Path "$deployDir\bin" | Out-Null
+          Copy-Item "$binDir\*.dll" "$deployDir\bin\" -Force
+          Copy-Item "$binDir\*.pdb" "$deployDir\bin\" -Force -ErrorAction SilentlyContinue
+          $packageDlls = @(
+            "packages\Microsoft.AspNet.WebApi.Client.6.0.0\lib\net45\System.Net.Http.Formatting.dll",
+            "packages\Microsoft.Web.Infrastructure.2.0.1\lib\net40\Microsoft.Web.Infrastructure.dll",
+            "packages\WebActivatorEx.2.0.0\lib\net40\WebActivatorEx.dll",
+            "packages\Microsoft.AspNet.WebApi.Core.5.3.0\lib\net45\System.Web.Http.dll",
+            "packages\Microsoft.AspNet.WebApi.WebHost.5.3.0\lib\net45\System.Web.Http.WebHost.dll",
+            "packages\Newtonsoft.Json.13.0.3\lib\net45\Newtonsoft.Json.dll"
+          )
+          foreach ($dll in $packageDlls) {
+            if (Test-Path $dll) { Copy-Item $dll "$deployDir\bin\" -Force }
+          }
+          Copy-Item "packages\sapnco_x64.3.0.18\lib\*.dll" "$deployDir\bin\" -Force
+          Copy-Item "Web.config" "$deployDir\" -Force
+          Copy-Item "Global.asax" "$deployDir\" -Force -ErrorAction SilentlyContinue
+          $zipPath = "${{ github.workspace }}\deploy\app.zip"
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\deploy" | Out-Null
+          Compress-Archive -Path "$deployDir\*" -DestinationPath $zipPath -Force
+          $size = [math]::Round((Get-Item $zipPath).Length/1MB, 2)
+          Write-Host "app.zip: ${size} MB"
+
+      - name: Deploy to staging slot
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: v2-hht-api
+          slot-name: staging
+          publish-profile: ${{ secrets.AZURE_HHT_STAGING_PROFILE }}
+          package: '${{ github.workspace }}\deploy\app.zip'
+
+      - name: Health check staging
+        shell: powershell
+        run: |
+          Start-Sleep 35
+          try {
+            $r = Invoke-WebRequest "https://v2-hht-api-staging.azurewebsites.net/api/hht/health" -UseBasicParsing -TimeoutSec 30
+            Write-Host "STAGING LIVE: $($r.Content)"
+          } catch {
+            Write-Host "Staging check: $_"
+          }
+          exit 0

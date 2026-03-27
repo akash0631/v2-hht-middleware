@@ -38,6 +38,44 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static readonly ConcurrentQueue<CallLog> _ring = new ConcurrentQueue<CallLog>();
         private const int RING_MAX = 1000;
 
+        // ── Response cache — read-only opcodes with 60s TTL ────────────────────
+        private sealed class CacheEntry { public string Body; public DateTime Expires; }
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CacheEntry>
+            _cache = new System.Collections.Concurrent.ConcurrentDictionary<string, CacheEntry>(StringComparer.OrdinalIgnoreCase);
+        private static readonly TimeSpan CACHE_TTL = TimeSpan.FromSeconds(60);
+        // Only cache opcodes that return near-static master/reference data
+        private static readonly HashSet<string> CACHEABLE = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "storegetbin", "storegetbin_v2", "zwm_store_get_bin", "zwm_store_get_bin_v2",
+            "packgingmaterial", "packingmaterial",
+            "zwm_store_get_major_cat", "zwm_store_get_major_cat_data",
+            "zwm_get_msa_section_list", "zwm_get_packing_material",
+            "getsloc", "validatesloc", "zwm_rfc_validate_dc_sloc",
+            "zfms_screen", "zwm_get_grc_bins"
+        };
+        private static string CacheKey(string opcode, string store) => opcode + "|" + (store ?? "?");
+        private static bool TryGetCache(string opcode, string store, out string body)
+        {
+            body = null;
+            if (!CACHEABLE.Contains(opcode)) return false;
+            if (_cache.TryGetValue(CacheKey(opcode, store), out var e) && e.Expires > DateTime.UtcNow)
+            { body = e.Body; return true; }
+            return false;
+        }
+        private static void SetCache(string opcode, string store, string body)
+        {
+            if (!CACHEABLE.Contains(opcode) || string.IsNullOrEmpty(body)) return;
+            // Don't cache error responses
+            if (body.Contains(""E#") || body.Contains("E#") || body.Length < 10) return;
+            _cache[CacheKey(opcode, store)] = new CacheEntry { Body = body, Expires = DateTime.UtcNow.Add(CACHE_TTL) };
+            // Evict expired entries periodically (every ~100 cache writes)
+            if (_cache.Count > 200)
+            {
+                var expired = _cache.Where(kv => kv.Value.Expires <= DateTime.UtcNow).Select(kv => kv.Key).ToList();
+                foreach (var k in expired) _cache.TryRemove(k, out _);
+            }
+        }
+
         // Active device sessions: key=userId, value=last seen info
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession> _sessions
             = new System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession>(StringComparer.OrdinalIgnoreCase);
@@ -255,6 +293,33 @@ namespace V2HHTMiddleware.Controllers.HHT
             return Txt(sb.ToString());
         }
 
+        // ── Cache stats ───────────────────────────────────────────────────────
+        [HttpGet, Route("cache/stats")]
+        public HttpResponseMessage CacheStats()
+        {
+            var now = DateTime.UtcNow;
+            var live  = _cache.Where(kv => kv.Value.Expires > now).ToList();
+            var data  = live.Select(kv => new {
+                key     = kv.Key,
+                expires = kv.Value.Expires.ToString("HH:mm:ss"),
+                ttl_sec = (int)(kv.Value.Expires - now).TotalSeconds
+            }).OrderBy(x => x.key).ToList();
+            return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new {
+                live_entries   = live.Count,
+                total_entries  = _cache.Count,
+                cacheable_ops  = CACHEABLE.Count,
+                ttl_seconds    = (int)CACHE_TTL.TotalSeconds,
+                entries        = data
+            }));
+        }
+
+        [HttpPost, Route("cache/clear")]
+        public HttpResponseMessage CacheClear()
+        {
+            _cache.Clear();
+            return Json("{"cleared":true}");
+        }
+
         // ── Active device sessions ────────────────────────────────────────────
         [HttpGet, Route("sessions")]
         public HttpResponseMessage Sessions()
@@ -350,6 +415,17 @@ namespace V2HHTMiddleware.Controllers.HHT
             string opcode  = ExtractOpcode(body);
             string store   = ExtractStore(body);
             string userId  = ExtractUserId(body);
+
+            // Cache check — serve cached response for read-only opcodes
+            if (TryGetCache(opcode, store, out string cachedBody))
+            {
+                LogAndReturn(opcode, 0, cachedBody, true, store, userId);
+                var cachedResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                cachedResp.Content = new StringContent(cachedBody, Encoding.UTF8, "application/json");
+                cachedResp.Headers.Add("X-Cache", "HIT");
+                return cachedResp;
+            }
+
             var    sw      = Stopwatch.StartNew();
             string respBody;
             bool   sapOk;
@@ -381,6 +457,9 @@ namespace V2HHTMiddleware.Controllers.HHT
                 respBody = "E#Proxy error: " + ex.Message.Replace("\n", " ");
                 sapOk    = false;
             }
+
+            // Cache successful responses for cacheable opcodes
+            if (sapOk) SetCache(opcode, store, respBody);
 
             return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store, userId);
         }
@@ -722,8 +801,10 @@ namespace V2HHTMiddleware.Controllers.HHT
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
                     LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
+                    if (ok) SetCache(opcode, store, noaclRaw);
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                     nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
+                    nativeResp.Headers.Add("X-Cache", "MISS");
                     return nativeResp;
                 }
                 // Java rejected content type — fall through to Path B

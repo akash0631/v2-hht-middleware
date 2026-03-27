@@ -782,8 +782,10 @@ namespace V2HHTMiddleware.Controllers.HHT
             var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "");
             if (string.IsNullOrEmpty(bapi)) bapi = qs["bapiname"] ?? "noacl";
 
-            string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
-                            ? "scnrec" : bapi.ToLower();
+            string opcode  = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
+                             ? "scnrec" : bapi.ToLower();
+            string store   = ExtractStore(rawBody);
+            string userId  = ExtractUserId(rawBody);
 
             var sw = Stopwatch.StartNew();
 

@@ -810,7 +810,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 {
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
-                    LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
+                    LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, store);
                     if (ok) SetCache(opcode, "?", noaclRaw);
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                     nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
@@ -842,12 +842,12 @@ namespace V2HHTMiddleware.Controllers.HHT
             catch (Exception ex)
             {
                 sw.Stop();
-                return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, opcode);
+                return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, store);
             }
 
             // Translate old response format → SAP JSON for v12 app
             string jsonOut = BuildSapJson(bapi, respBody ?? "");
-            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, opcode);
+            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, store);
             var httpOut = Request.CreateResponse(System.Net.HttpStatusCode.OK);
             httpOut.Content = new StringContent(jsonOut, Encoding.UTF8, "application/json");
             return httpOut;

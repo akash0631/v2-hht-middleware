@@ -12,7 +12,13 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
       - uses: NuGet/setup-nuget@v2
         with: { nuget-version: '6.x' }
-      - name: Restore packages
-        run: nuget restore V2HHTMiddleware.sln
-      - name: Build (check only)
-        run: msbuild V2HHTMiddleware.sln /p:Configuration=Release /p:Platform=AnyCPU
+      - name: NuGet Restore
+        run: nuget restore V2HHTMiddleware.sln -NonInteractive
+      - name: Build (compile check only — no deploy)
+        shell: powershell
+        run: |
+          msbuild V2HHTMiddleware.sln `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:VisualStudioVersion=17.0 `
+            /m /v:minimal

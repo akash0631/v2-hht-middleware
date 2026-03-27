@@ -801,7 +801,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
                     LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
-                    if (ok) SetCache(opcode, store, noaclRaw);
+                    if (ok) SetCache(opcode, "?", noaclRaw);
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                     nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
                     nativeResp.Headers.Add("X-Cache", "MISS");

@@ -20,7 +20,7 @@ namespace V2HHTMiddleware.Controllers.HHT
     public class HHTController : ApiController
     {
         // ── Constants ──────────────────────────────────────────────────────────
-        private const string APK_VERSION = "12.098";
+        private const string APK_VERSION = "12.099";
         private const string APK_URL     = "https://assets.eatnubo.com/hht/V2_HHT_Azure_Release.apk";
         private const string MW_VERSION  = "v2-hht-azure|5.0";
 

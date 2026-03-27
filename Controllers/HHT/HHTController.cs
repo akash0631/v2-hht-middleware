@@ -487,8 +487,15 @@ namespace V2HHTMiddleware.Controllers.HHT
 
                 // Update active sessions — track by userId (from scnrec/login) 
                 // OR by store code when store is a real 4-char site code (not "?")
+                // store is a real plant code if it's short (2-6 chars), not "?", 
+                // and contains no underscores (opcodes have underscores or are lowercase)
+                bool isRealStore = store != null && store != "?" 
+                                   && store.Length >= 2 && store.Length <= 6
+                                   && !store.Contains("_")
+                                   && store != opcode
+                                   && !store.Equals("scnrec", StringComparison.OrdinalIgnoreCase);
                 var sessionKey = !string.IsNullOrEmpty(userId) ? userId
-                                : (store != null && store.Length >= 2 && store.Length <= 6 && store != "?") ? "S:" + store
+                                : isRealStore ? "S:" + store
                                 : null;
                 if (sessionKey != null)
                 {

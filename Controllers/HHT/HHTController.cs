@@ -485,14 +485,16 @@ namespace V2HHTMiddleware.Controllers.HHT
                 _ring.Enqueue(entry);
                 while (_ring.Count > RING_MAX) _ring.TryDequeue(out _);
 
-                // Update active sessions — track by userId when available, else by store
+                // Update active sessions — track by userId (from scnrec/login) 
+                // OR by store code when store is a real 4-char site code (not "?")
                 var sessionKey = !string.IsNullOrEmpty(userId) ? userId
-                                : !string.IsNullOrEmpty(store) && store != "?" ? "store:" + store
+                                : (store != null && store.Length >= 2 && store.Length <= 6 && store != "?") ? "S:" + store
                                 : null;
                 if (sessionKey != null)
                 {
+                    var displayId = !string.IsNullOrEmpty(userId) ? userId : store;
                     _sessions.AddOrUpdate(sessionKey,
-                        _ => new DeviceSession { UserId = !string.IsNullOrEmpty(userId) ? userId : store, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
+                        _ => new DeviceSession { UserId = displayId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
                         (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; return s; });
                 }
 

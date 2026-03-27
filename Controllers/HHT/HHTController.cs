@@ -934,7 +934,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
                     LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, opcode);
-                    if (ok) SetCache(opcode, "?", noaclRaw);
+                    if (ok) SetCache(opcode, store, noaclRaw);
                     // Resolve any waiters on this dedup key
                     if (dedupKey != null && _inFlight.TryRemove(dedupKey, out var tcsOk)) tcsOk.TrySetResult(noaclRaw);
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);

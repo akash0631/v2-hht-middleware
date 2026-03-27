@@ -277,17 +277,15 @@ namespace V2HHTMiddleware.Controllers.HHT
             // Recent calls
             sb.AppendLine();
             sb.AppendLine("LAST 500 CALLS:");
-            sb.AppendLine($"{"Timestamp",-20} {"Opcode",-35} {"Store",-6} {"Ms",6} {"SAP_OK",6} {"Resp",35}");
-            sb.AppendLine(new string('-', 110));
-            var recent = _ring.ToArray();
-            int ringCount = Math.Min(recent.Length, 500);
             sb.AppendLine($"{"Timestamp",-20} {"User",-8} {"Opcode",-35} {"Store",-6} {"Ms",6} {"OK",4} {"Resp",40}");
             sb.AppendLine(new string('-', 125));
+            var recent = _ring.ToArray();
+            int ringCount = Math.Min(recent.Length, 500);
             for (int i = recent.Length - 1; i >= recent.Length - ringCount; i--)
             {
                 var c = recent[i];
                 string uid = string.IsNullOrEmpty(c.UserId) ? "-" : c.UserId;
-                sb.AppendLine($"{c.Timestamp:HH:mm:ss.fff,-20} {uid,-8} {c.Opcode,-35} {c.Store,-6} {c.ElapsedMs,6} {(c.SapOk?"✅":"❌"),4}  {c.ResponseSnippet,-40}");
+                sb.AppendLine($"{c.Timestamp.ToString("HH:mm:ss.fff"),-20} {uid,-8} {c.Opcode,-35} {c.Store,-6} {c.ElapsedMs,6} {(c.SapOk?"✅":"❌"),4}  {c.ResponseSnippet,-40}");
             }
 
             return Txt(sb.ToString());

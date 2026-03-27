@@ -8,7 +8,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
     }
     public class NitDelHandler : HHTBaseHandler {
         readonly bool _qa; public NitDelHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_PO_GET_DETAILS");f.SetValue("IM_EBELN",P(1));f.SetValue("IM_XBLNR",P(2));f.SetValue("IM_GATE_ENTRY",P(3));f.SetValue("IM_BILL",P(4));f.SetValue("IM_USER",P(5));f.SetValue("IM_FRBNR",P(6));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));return"S#"+Tbl(f.GetTable("ET_PO_DATA"),"MATNR","MENGE","LGPLA")+"!"+EanData(f.GetTable("ET_EAN_DATA"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // PO header+items don't change while receiving — cache 3min
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetNitDel(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_PO_GET_DETAILS");f.SetValue("IM_EBELN",P(1));f.SetValue("IM_XBLNR",P(2));f.SetValue("IM_GATE_ENTRY",P(3));f.SetValue("IM_BILL",P(4));f.SetValue("IM_USER",P(5));f.SetValue("IM_FRBNR",P(6));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));
+            var result="S#"+Tbl(f.GetTable("ET_PO_DATA"),"MATNR","MENGE","LGPLA")+"!"+EanData(f.GetTable("ET_EAN_DATA"));
+            V2HHTMiddleware.Infrastructure.HHTCache.SetNitDel(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class NitUpdHandler : HHTBaseHandler {
         readonly bool _qa; public NitUpdHandler(bool qa){_qa=qa;}
@@ -16,7 +24,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
     }
     public class ScnDeliveryHandler : HHTBaseHandler {
         readonly bool _qa; public ScnDeliveryHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DELIVERY_GET_DETAILS");f.SetValue("IM_VBELN",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));var likp=f.GetStructure("EX_LIKP");var hdr=likp.GetString("KUNNR")+"#"+likp.GetString("VBELN");return"S#"+hdr+"#"+Tbl(f.GetTable("ET_LIPS"),"MATNR","WERKS","LGORT","CHARG","LFIMG","VRKME","ORMNG")+"!"+EanData(f.GetTable("ET_EAN_DATA"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Delivery header + planned quantities are static (LFIMG/ORMNG don't update on scan)
+            string ck=(_qa?"qa:":"")+P(1);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetScnDelivery(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DELIVERY_GET_DETAILS");f.SetValue("IM_VBELN",P(1));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));var likp=f.GetStructure("EX_LIKP");var hdr=likp.GetString("KUNNR")+"#"+likp.GetString("VBELN");
+            var result="S#"+hdr+"#"+Tbl(f.GetTable("ET_LIPS"),"MATNR","WERKS","LGORT","CHARG","LFIMG","VRKME","ORMNG")+"!"+EanData(f.GetTable("ET_EAN_DATA"));
+            V2HHTMiddleware.Infrastructure.HHTCache.SetScnDelivery(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class ScnSelHandler : HHTBaseHandler
     {
@@ -111,15 +127,39 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
     }
     public class StockTakeArtiValiHandler : HHTBaseHandler {
         readonly bool _qa; public StockTakeArtiValiHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_ARTI_VALI");f.SetValue("IM_BARCODE",P(1));f.SetValue("IM_SITE",P(2));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));var m=f.GetStructure("EX_MARM");return"S#"+m.GetString("MATNR")+"#"+m.GetString("UMREZ")+"#"+m.GetString("EAN11");}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Barcode→article mapping is master data — never changes during count
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetStockArti(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_ARTI_VALI");f.SetValue("IM_BARCODE",P(1));f.SetValue("IM_SITE",P(2));f.Invoke(d);var r=f.GetStructure("EX_RETURN");if(r.GetString("TYPE")=="E")return Err(r.GetString("MESSAGE"));var m=f.GetStructure("EX_MARM");
+            var result="S#"+m.GetString("MATNR")+"#"+m.GetString("UMREZ")+"#"+m.GetString("EAN11");
+            V2HHTMiddleware.Infrastructure.HHTCache.SetStockArti(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class StockTakeBinValiHandler : HHTBaseHandler {
         readonly bool _qa; public StockTakeBinValiHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_BIN_VALI");f.SetValue("IM_BIN",P(1));f.SetValue("IM_SITE",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Bin validity during stock count — bin exists or not, stable 10min
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetStockBinVal(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_BIN_VALI");f.SetValue("IM_BIN",P(1));f.SetValue("IM_SITE",P(2));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetStockBinVal(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class StockTakeCrateValiHandler : HHTBaseHandler {
         readonly bool _qa; public StockTakeCrateValiHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_CRATE_VALI");f.SetValue("IM_CRATE",P(1));f.SetValue("IM_SITE",P(2));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // Crate validity — registered at start of count, stable 5min
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetStockCrateVal(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_RFC_STOCK_TAKE_CRATE_VALI");f.SetValue("IM_CRATE",P(1));f.SetValue("IM_SITE",P(2));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetStockCrateVal(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class StockTakeSaveV11Handler : HHTBaseHandler {
         readonly bool _qa; public StockTakeSaveV11Handler(bool qa){_qa=qa;}
@@ -137,7 +177,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
     }
     public class DcHuGrtValHandler : HHTBaseHandler {
         readonly bool _qa; public DcHuGrtValHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DC_HU_GRT_VAL");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_SLGORT",P(2));f.SetValue("IM_DLGORT",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // SLOC-to-SLOC mapping is master data — stable 2min
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2)+":"+P(3);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetDcHuGrtVal(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DC_HU_GRT_VAL");f.SetValue("IM_WERKS",P(1));f.SetValue("IM_SLGORT",P(2));f.SetValue("IM_DLGORT",P(3));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetDcHuGrtVal(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class DcHuGrtBinHuValHandler : HHTBaseHandler {
         readonly bool _qa; public DcHuGrtBinHuValHandler(bool qa){_qa=qa;}
@@ -145,7 +193,15 @@ namespace V2HHTMiddleware.Controllers.HHT.Handlers.DC
     }
     public class DcHuGrtHuValHandler : HHTBaseHandler {
         readonly bool _qa; public DcHuGrtHuValHandler(bool qa){_qa=qa;}
-        public override string Execute(){try{var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DC_HUGRT_HU_VAL");f.SetValue("IM_EXIDV",P(1));f.SetValue("IM_WERKS",P(2));f.SetValue("IM_SLOC",P(3));f.Invoke(d);return TypeMsg(f.GetStructure("EX_RETURN"));}catch(System.Exception e){return Err(e.Message);}}
+        public override string Execute(){try{
+            // HU validation — short TTL (1min) as HU status can change after scan
+            string ck=(_qa?"qa:":"")+P(1)+":"+P(2)+":"+P(3);
+            string cached=V2HHTMiddleware.Infrastructure.HHTCache.GetDcHuVal(ck);
+            if(cached!=null)return cached;
+            var d=_qa?QA():Prod();var f=d.Repository.CreateFunction("ZWM_DC_HUGRT_HU_VAL");f.SetValue("IM_EXIDV",P(1));f.SetValue("IM_WERKS",P(2));f.SetValue("IM_SLOC",P(3));f.Invoke(d);
+            var result=TypeMsg(f.GetStructure("EX_RETURN"));
+            if(!result.StartsWith("E#"))V2HHTMiddleware.Infrastructure.HHTCache.SetDcHuVal(ck,result);
+            return result;}catch(System.Exception e){return Err(e.Message);}}
     }
     public class DcHuGrtSaveHandler : HHTBaseHandler {
         readonly bool _qa; public DcHuGrtSaveHandler(bool qa){_qa=qa;}

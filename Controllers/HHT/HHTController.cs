@@ -264,15 +264,15 @@ namespace V2HHTMiddleware.Controllers.HHT
                 .Where(s => s.LastSeen >= cutoff)
                 .OrderByDescending(s => s.LastSeen)
                 .Select(s => new {
-                    user_id    = s.UserId,
-                    store      = s.Store,
-                    last_opcode= s.LastOpcode,
-                    last_seen  = s.LastSeen.ToString("HH:mm:ss"),
+                    user_id        = s.UserId,
+                    store          = s.Store,
+                    last_opcode    = s.LastOpcode,
+                    last_seen      = s.LastSeen.ToString("HH:mm:ss"),
                     last_seen_mins = (int)(DateTime.UtcNow - s.LastSeen).TotalMinutes,
-                    call_count = s.CallCount,
-                    active     = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
-                });
-            return Json(new { sessions = active, total = active.Count() });
+                    call_count     = s.CallCount,
+                    active         = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
+                }).ToList();
+            return Json(new { sessions = active, total = active.Count });
         }
 
         // ── Per-opcode drill-down ──────────────────────────────────────────────

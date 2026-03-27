@@ -738,13 +738,12 @@ namespace V2HHTMiddleware.Controllers.HHT
             return parts.Length >= 2 ? parts[1] : "";
         }
 
-        // ── Task.TimeoutAfter extension ──────────────────────────────────────
-        private static async System.Threading.Tasks.Task<T> TimeoutAfter<T>(
-            this System.Threading.Tasks.Task<T> task, TimeSpan timeout)
+        // ── Task with timeout helper (not extension — HHTController is not static) ──
+        private static async Task<T> WithTimeout<T>(Task<T> task, TimeSpan timeout)
         {
-            var delay = System.Threading.Tasks.Task.Delay(timeout);
-            var done  = await System.Threading.Tasks.Task.WhenAny(task, delay).ConfigureAwait(false);
-            if (done == delay) throw new System.OperationCanceledException("Dedup wait timed out");
+            var delay = Task.Delay(timeout);
+            var done  = await Task.WhenAny(task, delay).ConfigureAwait(false);
+            if (done == delay) throw new OperationCanceledException("Dedup wait timed out");
             return await task.ConfigureAwait(false);
         }
 
@@ -873,8 +872,8 @@ namespace V2HHTMiddleware.Controllers.HHT
                         {
                             try
                             {
-                                string dedupResult = await existing.Task
-                                    .TimeoutAfter(TimeSpan.FromSeconds(55)).ConfigureAwait(false);
+                                string dedupResult = await WithTimeout(existing.Task,
+                                    TimeSpan.FromSeconds(55)).ConfigureAwait(false);
                                 sw.Stop();
                                 LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, dedupResult, true, store);
                                 var dedupResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);

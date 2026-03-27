@@ -66,7 +66,7 @@ namespace V2HHTMiddleware.Controllers.HHT
         {
             if (!CACHEABLE.Contains(opcode) || string.IsNullOrEmpty(body)) return;
             // Don't cache error responses
-            if (body.Contains(""E#") || body.Contains("E#") || body.Length < 10) return;
+            if (body.Contains("E#") || body.Length < 10) return;
             _cache[CacheKey(opcode, store)] = new CacheEntry { Body = body, Expires = DateTime.UtcNow.Add(CACHE_TTL) };
             // Evict expired entries periodically (every ~100 cache writes)
             if (_cache.Count > 200)
@@ -317,7 +317,7 @@ namespace V2HHTMiddleware.Controllers.HHT
         public HttpResponseMessage CacheClear()
         {
             _cache.Clear();
-            return Json("{"cleared":true}");
+            return Json(@"{""cleared"":true}");
         }
 
         // ── Active device sessions ────────────────────────────────────────────

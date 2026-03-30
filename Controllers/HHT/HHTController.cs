@@ -38,16 +38,10 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static readonly ConcurrentQueue<CallLog> _ring = new ConcurrentQueue<CallLog>();
         private const int RING_MAX = 1000;
 
-        // ── Plant / Store name cache ────────────────────────────────────────────
-        // Loaded from Supabase store_plant_master_aka on first call to /plantnames.
-        // Android app calls /plantnames once per session and caches in memory.
-        private static Dictionary<string, string> _plantCache = null;
-        private static readonly SemaphoreSlim _plantLock = new SemaphoreSlim(1, 1);
-        private static DateTime _plantLoadedAt = DateTime.MinValue;
-        private const string SUPABASE_PLANT_URL =
-            "https://pymdqnnwwxrgeolvgvgv.supabase.co/rest/v1/store_plant_master_aka?select=STORE-CODE,STORE-NAME&limit=1000";
-        private const string SUPABASE_ANON_KEY =
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5bWRxbm53d3hyZ2VvbHZndmd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMzU0NzYsImV4cCI6MjA2ODkxMTQ3Nn0.jUrb0jIg6qjj2Rlh9DxYesSnbstoD4uoDCswqOqAkUM";
+        // ── Plant / Store name cache (code → short name from Supabase) ──────────
+        // Populated on startup by static constructor; refreshable via POST /refresh-plants.
+        private static readonly Dictionary<string, string> _plantNames =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         // ── Response cache — read-only opcodes with 60s TTL ────────────────────
         private sealed class CacheEntry { public string Body; public DateTime Expires; }

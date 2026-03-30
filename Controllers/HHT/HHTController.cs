@@ -210,53 +210,69 @@ namespace V2HHTMiddleware.Controllers.HHT
         // Returns plant code → short name lookup for HU Swap label printing.
         // Cached in memory on deployment — call once per app session.
         [HttpGet, Route("plants")]
-        public HttpResponseMessage GetPlants()
+        public async Task<IHttpActionResult> GetPlants()
         {
-            return Request.CreateResponse(HttpStatusCode.OK, _plantNames);
+            if (_plantNames.Count == 0)
+                await LoadPlantNamesAsync();
+            return Ok(_plantNames);
         }
 
         // ── POST /api/hht/refresh-plants ───────────────────────────────────────
-        // Re-fetches from Supabase and reloads the in-memory cache.
-        // Call this after store master changes instead of redeploying.
         [HttpPost, Route("refresh-plants")]
-        public async Task<HttpResponseMessage> RefreshPlants()
+        public async Task<IHttpActionResult> RefreshPlants()
         {
+            _plantNames.Clear();
+            int count = await LoadPlantNamesAsync();
+            return Ok(new { refreshed = count, message = "Plant names reloaded from Supabase" });
+        }
+
+        // ── Internal helper — loads from Supabase into _plantNames ─────────────
+        private static readonly SemaphoreSlim _plantLock = new SemaphoreSlim(1, 1);
+        private static async Task<int> LoadPlantNamesAsync()
+        {
+            await _plantLock.WaitAsync();
             try
             {
-                const string SUPABASE_URL = "https://pymdqnnwwxrgeolvgvgv.supabase.co";
-                const string ANON_KEY     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5bWRxbm53d3hyZ2VvbHZndmd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMzU0NzYsImV4cCI6MjA2ODkxMTQ3Nn0.jUrb0jIg6qjj2Rlh9DxYesSnbstoD4uoDCswqOqAkUM";
-                const string ENDPOINT     = SUPABASE_URL +
-                    "/rest/v1/store_plant_master_aka?select=STORE-CODE,STORE-NAME&limit=1000";
+                // Double-check after lock
+                if (_plantNames.Count > 0) return _plantNames.Count;
 
-                using (var req = new HttpRequestMessage(HttpMethod.Get, ENDPOINT))
+                const string ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5bWRxbm53d3hyZ2VvbHZndmd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMzU0NzYsImV4cCI6MjA2ODkxMTQ3Nn0.jUrb0jIg6qjj2Rlh9DxYesSnbstoD4uoDCswqOqAkUM";
+                const string URL      = "https://pymdqnnwwxrgeolvgvgv.supabase.co/rest/v1/store_plant_master_aka?select=STORE-CODE,STORE-NAME&limit=1000";
+
+                using (var req = new HttpRequestMessage(HttpMethod.Get, URL))
                 {
                     req.Headers.Add("apikey",        ANON_KEY);
                     req.Headers.Add("Authorization", "Bearer " + ANON_KEY);
                     var resp = await _http.SendAsync(req);
+                    if (!resp.IsSuccessStatusCode) return 0;
+
                     var body = await resp.Content.ReadAsStringAsync();
                     var rows = Newtonsoft.Json.JsonConvert.DeserializeObject<
                         List<Dictionary<string, string>>>(body);
 
                     int count = 0;
-                    _plantNames.Clear();
-                    foreach (var row in rows)
+                    foreach (var row in rows ?? new List<Dictionary<string, string>>())
                     {
                         var code = row.ContainsKey("STORE-CODE") ? (row["STORE-CODE"] ?? "").Trim().ToUpper() : "";
-                        var name = row.ContainsKey("STORE-NAME") ? (row["STORE-NAME"] ?? "").Trim()         : "";
+                        var name = row.ContainsKey("STORE-NAME") ? (row["STORE-NAME"] ?? "").Trim()           : "";
                         if (!string.IsNullOrEmpty(code) && !string.IsNullOrEmpty(name))
                         {
                             _plantNames[code] = name;
                             count++;
                         }
                     }
-                    return Request.CreateResponse(HttpStatusCode.OK,
-                        new { refreshed = count, message = "Plant names reloaded from Supabase" });
+                    System.Diagnostics.Debug.WriteLine($"PlantNames: loaded {count} entries from Supabase");
+                    return count;
                 }
             }
             catch (Exception ex)
             {
-                return Request.CreateResponse(HttpStatusCode.InternalServerError,
-                    new { error = ex.Message });
+                System.Diagnostics.Debug.WriteLine("PlantNames load error: " + ex.Message);
+                return 0;
+            }
+            finally
+            {
+                _plantLock.Release();
             }
         }
 

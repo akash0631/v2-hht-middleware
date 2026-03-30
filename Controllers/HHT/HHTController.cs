@@ -21,7 +21,7 @@ namespace V2HHTMiddleware.Controllers.HHT
     {
         // ── Constants ──────────────────────────────────────────────────────────
         private const string APK_VERSION = "12.101";
-        private const string APK_URL     = "https://assets.eatnubo.com/hht/V2_HHT_Azure_Release.apk";
+        private const string APK_URL     = "https://apk.v2retail.net/download";
         private const string MW_VERSION  = "v2-hht-azure|5.0";
 
         // Persistent stats file — survives App Service restarts (D:\home is mounted storage)

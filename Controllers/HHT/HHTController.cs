@@ -188,13 +188,38 @@ namespace V2HHTMiddleware.Controllers.HHT
         }
 
 
+        // ── MIN version — bump this to force all devices below it to upgrade ──
+        private const string MIN_APK_VERSION = "12.099";
+        private static int CmpVer(string a, string b) {
+            try {
+                var pa=a.Split('.'); var pb=b.Split('.');
+                for(int i=0;i<Math.Max(pa.Length,pb.Length);i++){
+                    int va=i<pa.Length?int.Parse(pa[i]):0,vb=i<pb.Length?int.Parse(pb[i]):0;
+                    if(va!=vb)return va-vb;
+                } return 0;
+            }catch{return 0;}
+        }
+
         [HttpGet, Route("appversion")]
         public HttpResponseMessage AppVersion()
-            => Json($"{{\"upgrade\":\"none\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+        {
+            var qs=System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
+            var maj=qs["majorVersion"]??""; var min=qs["minorVersion"]??"";
+            var dv=(maj.Length>0&&min.Length>0)?maj+"."+min:APK_VERSION;
+            var upg=CmpVer(dv,MIN_APK_VERSION)<0?"available":"none";
+            return Json($"{{\"upgrade\":\"{upg}\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+        }
 
         [HttpGet, Route("ValueXMW/appversion")]
         public HttpResponseMessage AppVersionLegacy()
-            => Json($"{{\"upgrade\":\"none\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+        {
+            var qs=System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
+            var maj=qs["majorVersion"]??""; var min=qs["minorVersion"]??"";
+            var dv=(maj.Length>0&&min.Length>0)?maj+"."+min:APK_VERSION;
+            var upg=CmpVer(dv,MIN_APK_VERSION)<0?"available":"none";
+            return Json($"{{\"upgrade\":\"{upg}\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+        }
+
 
         // ── Health ─────────────────────────────────────────────────────────────
         [HttpGet, Route("health")]

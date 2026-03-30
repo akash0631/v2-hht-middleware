@@ -189,7 +189,7 @@ namespace V2HHTMiddleware.Controllers.HHT
 
 
         // ── MIN version — bump this to force all devices below it to upgrade ──
-        private const string MIN_APK_VERSION = "12.099";
+        private const string MIN_APK_VERSION = "1.0"; // auto-update disabled — re-enable once all devices on new cert
         private static int CmpVer(string a, string b) {
             try {
                 var pa=a.Split('.'); var pb=b.Split('.');

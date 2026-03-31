@@ -194,7 +194,19 @@ namespace V2HHTMiddleware.Controllers.HHT
 
 
         // ── MIN version — bump this to force all devices below it to upgrade ──
-        private const string MIN_APK_VERSION = "1.0"; // auto-update disabled — re-enable once all devices on new cert
+        // ══════════════════════════════════════════════════════════════════════════
+        // MIN_APK_VERSION controls force-upgrade on all ~1000 devices.
+        // Setting this ABOVE "1.0" will trigger auto-download + install on
+        // every device below that version — stopping warehouse operations.
+        //
+        // ONLY change this after:
+        //   1. All devices are confirmed on the new cert
+        //   2. Explicit sign-off from Akash
+        //   3. Outside working hours
+        //
+        // DO NOT change this when bumping APK_VERSION. They are independent.
+        // ══════════════════════════════════════════════════════════════════════
+        private const string MIN_APK_VERSION = "1.0"; // DISABLED — DO NOT RAISE
         private static int CmpVer(string a, string b) {
             try {
                 var pa=a.Split('.'); var pb=b.Split('.');

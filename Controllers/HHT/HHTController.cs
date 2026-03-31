@@ -448,6 +448,13 @@ namespace V2HHTMiddleware.Controllers.HHT
                     call_count     = s.CallCount,
                     active         = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
                 }).ToList();
+
+            // Device counts from IP tracker
+            var now = DateTime.UtcNow;
+            int devLive = _deviceIps.Values.Count(t => (now - t).TotalMinutes < 5);
+            int dev30m  = _deviceIps.Values.Count(t => (now - t).TotalMinutes < 30);
+            int devTotal = _deviceIps.Count;
+
             return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new { sessions = active, total = active.Count }));
         }
 
@@ -526,6 +533,19 @@ namespace V2HHTMiddleware.Controllers.HHT
             string opcode  = ExtractOpcode(body);
             string store   = ExtractStore(body);
             string userId  = ExtractUserId(body);
+
+            // Per-device IP tracking — each Zebra device = 1 unique IP on store WiFi
+            string clientIp = "";
+            try {
+                var fwd = Request.Headers.GetValues("X-Forwarded-For");
+                if (fwd != null) clientIp = fwd.FirstOrDefault()?.Split(',').FirstOrDefault()?.Trim() ?? "";
+            } catch { }
+            if (!string.IsNullOrEmpty(clientIp) && clientIp != "127.0.0.1") {
+                _deviceIps[clientIp + ":" + (store ?? "?")] = DateTime.UtcNow;
+                var cutoff60 = DateTime.UtcNow.AddMinutes(-60);
+                foreach (var k in _deviceIps.Keys.ToList())
+                    if (_deviceIps.TryGetValue(k, out var ts) && ts < cutoff60) _deviceIps.TryRemove(k, out _);
+            }
 
             // Cache check — serve cached response for read-only opcodes
             if (TryGetCache(opcode, store, out string cachedBody))
@@ -614,8 +634,8 @@ namespace V2HHTMiddleware.Controllers.HHT
                 {
                     var displayId = !string.IsNullOrEmpty(userId) ? userId : store;
                     _sessions.AddOrUpdate(sessionKey,
-                        _ => new DeviceSession { UserId = displayId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
-                        (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; return s; });
+                        _ => new DeviceSession { UserId = displayId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1, ClientIp=clientIp },
+                        (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; s.ClientIp=clientIp; return s; });
                 }
 
                 // Opcode stats (persisted)
@@ -847,7 +867,13 @@ namespace V2HHTMiddleware.Controllers.HHT
             public string   LastOpcode  { get; set; }
             public DateTime LastSeen    { get; set; }
             public int      CallCount   { get; set; }
+            public string   ClientIp    { get; set; }
         }
+
+        // Device-level tracker: key="ip:store", value=last-seen UTC
+        // Each Zebra handheld on store WiFi gets its own DHCP IP → accurate device count
+        private static readonly ConcurrentDictionary<string, DateTime> _deviceIps
+            = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
         public class PersistedStats
         {

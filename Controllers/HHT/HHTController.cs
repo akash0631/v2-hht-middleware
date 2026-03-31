@@ -449,11 +449,11 @@ namespace V2HHTMiddleware.Controllers.HHT
                     active         = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
                 }).ToList();
 
-            // Device counts from IP tracker
+            // Device counts from serial tracker (X-HHT-Serial header — unique per Android device)
             var now = DateTime.UtcNow;
-            int devLive = _deviceIps.Values.Count(t => (now - t).TotalMinutes < 5);
-            int dev30m  = _deviceIps.Values.Count(t => (now - t).TotalMinutes < 30);
-            int devTotal = _deviceIps.Count;
+            int devLive  = _deviceSerials.Values.Count(t => (now - t).TotalMinutes < 5);
+            int dev30m   = _deviceSerials.Values.Count(t => (now - t).TotalMinutes < 30);
+            int devTotal = _deviceSerials.Count;
 
             return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new { sessions = active, total = active.Count, device_count_live = devLive, device_count_30m = dev30m, device_count_total = devTotal }));
         }
@@ -534,17 +534,18 @@ namespace V2HHTMiddleware.Controllers.HHT
             string store   = ExtractStore(body);
             string userId  = ExtractUserId(body);
 
-            // Per-device IP tracking — each Zebra device = 1 unique IP on store WiFi
-            string clientIp = "";
+            // Per-device tracking via X-HHT-Serial header (Android ANDROID_ID)
+            // Each Zebra device sends its unique Android ID → accurate device count regardless of NAT
+            string deviceSerial = "";
             try {
-                var fwd = Request.Headers.GetValues("X-Forwarded-For");
-                if (fwd != null) clientIp = fwd.FirstOrDefault()?.Split(',').FirstOrDefault()?.Trim() ?? "";
+                var sHdr = Request.Headers.GetValues("X-HHT-Serial");
+                if (sHdr != null) deviceSerial = sHdr.FirstOrDefault()?.Trim() ?? "";
             } catch { }
-            if (!string.IsNullOrEmpty(clientIp) && clientIp != "127.0.0.1") {
-                _deviceIps[clientIp + ":" + (store ?? "?")] = DateTime.UtcNow;
-                var cutoff60 = DateTime.UtcNow.AddMinutes(-60);
-                foreach (var k in _deviceIps.Keys.ToList())
-                    if (_deviceIps.TryGetValue(k, out var ts) && ts < cutoff60) _deviceIps.TryRemove(k, out _);
+            if (!string.IsNullOrEmpty(deviceSerial)) {
+                _deviceSerials[deviceSerial + ":" + (store ?? "?")] = DateTime.UtcNow;
+                var cutoffS = DateTime.UtcNow.AddMinutes(-60);
+                foreach (var k in _deviceSerials.Keys.ToList())
+                    if (_deviceSerials.TryGetValue(k, out var ts) && ts < cutoffS) _deviceSerials.TryRemove(k, out _);
             }
 
             // Cache check — serve cached response for read-only opcodes
@@ -870,8 +871,12 @@ namespace V2HHTMiddleware.Controllers.HHT
             public string   ClientIp    { get; set; }
         }
 
-        // Device-level tracker: key="ip:store", value=last-seen UTC
-        // Each Zebra handheld on store WiFi gets its own DHCP IP → accurate device count
+        // Device-level tracker: key="androidId:store" (X-HHT-Serial header), value=last-seen UTC
+        // Each Zebra device sends its unique Android ANDROID_ID → true per-device count, NAT-independent
+        private static readonly ConcurrentDictionary<string, DateTime> _deviceSerials
+            = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        // Legacy IP tracker (kept but not used for counting — NAT makes it store-level only)
         private static readonly ConcurrentDictionary<string, DateTime> _deviceIps
             = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 

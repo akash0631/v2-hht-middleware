@@ -455,7 +455,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             int dev30m  = _deviceIps.Values.Count(t => (now - t).TotalMinutes < 30);
             int devTotal = _deviceIps.Count;
 
-            return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new { sessions = active, total = active.Count }));
+            return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new { sessions = active, total = active.Count, device_count_live = devLive, device_count_30m = dev30m, device_count_total = devTotal }));
         }
 
         // ── Per-opcode drill-down ──────────────────────────────────────────────

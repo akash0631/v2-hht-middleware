@@ -634,8 +634,8 @@ namespace V2HHTMiddleware.Controllers.HHT
                 {
                     var displayId = !string.IsNullOrEmpty(userId) ? userId : store;
                     _sessions.AddOrUpdate(sessionKey,
-                        _ => new DeviceSession { UserId = displayId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1, ClientIp=clientIp },
-                        (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; s.ClientIp=clientIp; return s; });
+                        _ => new DeviceSession { UserId = displayId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
+                        (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; return s; });
                 }
 
                 // Opcode stats (persisted)

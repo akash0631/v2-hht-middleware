@@ -223,9 +223,10 @@ OK|v2-hht-azure|5.0|apk=12.106|java=http://127.0.0.68:9080/xmwgw|java=ok:200:34m
 ```
 *Note: `device_count_*` will populate as devices update to the new APK that sends `X-HHT-Serial` header. Sessions are keyed by store WERKS code, not individual device — each entry = one store location.*
 
-### Two-path RFC routing
-1. **Path A (noacl):** Middleware tries `Java /xmwgw/noacljsonrfcadaptor` first — returns native SAP JSON for all modern RFCs
-2. **Path B (ValueXMW fallback):** If Path A fails or returns content-type error, falls back to old `Java /xmwgw/ValueXMW` — legacy format, response translated to SAP JSON by `BuildSapJson()`
+### Three-path RFC routing
+1. **Path A (noacl):** Middleware tries `Java /xmwgw/noacljsonrfcadaptor` first — returns native SAP JSON for all modern RFCs. Empty `{}` response now falls through (previously returned as-is).
+2. **Path B (ValueXMW fallback):** If Path A fails, returns `{}`, or content-type error, falls back to old `Java /xmwgw/ValueXMW` — legacy format, response translated to SAP JSON by `BuildSapJson()`
+3. **Path C (RFC API proxy):** If Path B returns "Operation not supported" (Java doesn't know the RFC), calls `https://sap-api.v2retail.net/api/rfc/proxy` via HTTPS with header `X-RFC-Key: v2-rfc-proxy-2026`. This generic proxy on Server .36 connects to SAP Dev (.174, client 210) via NCo and returns native SAP JSON including full `EX_RETURN` structure. Stats logged as `opcode#pathC`. **Any new RFC deployed in SAP works automatically — no Java middleware or Azure middleware changes needed.**
 
 ### In-memory state (resets on restart)
 - `_sessions` — active store sessions, keyed by userId or "S:"+store

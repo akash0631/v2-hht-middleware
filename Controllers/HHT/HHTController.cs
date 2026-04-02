@@ -949,10 +949,12 @@ namespace V2HHTMiddleware.Controllers.HHT
                 string noaclRaw = await noaclResp.Content.ReadAsStringAsync().ConfigureAwait(false);
 
                 // Java accepted the request if response is valid JSON (not the content-type error string)
+                // Also reject empty "{}" — means Java doesn't know this RFC
                 if (!string.IsNullOrEmpty(noaclRaw) &&
                     !noaclRaw.Contains("Only Applicaton/Json") &&
                     !noaclRaw.Contains("Content Type Not supported") &&
-                    noaclRaw.TrimStart().StartsWith("{"))
+                    noaclRaw.TrimStart().StartsWith("{") &&
+                    noaclRaw.Trim() != "{}")
                 {
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
@@ -993,6 +995,48 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             // Translate old response format → SAP JSON for v12 app
             string jsonOut = BuildSapJson(bapi, respBody ?? "");
+
+            // ── PATH C: RFC API proxy (fallback for RFCs unknown to Java) ────────
+            // Only attempt if Path B returned an error (Response:null or E#...)
+            bool pathBFailed = false;
+            try
+            {
+                var check = Newtonsoft.Json.Linq.JObject.Parse(jsonOut);
+                var exRet = check["EX_RETURN"] as Newtonsoft.Json.Linq.JObject;
+                pathBFailed = exRet != null &&
+                    "E".Equals(exRet["TYPE"]?.ToString(), StringComparison.OrdinalIgnoreCase) &&
+                    (exRet["MESSAGE"]?.ToString() ?? "").Contains("not supported");
+            }
+            catch { }
+
+            if (pathBFailed)
+            {
+                try
+                {
+                    string proxyUrl = "https://sap-api.v2retail.net/api/rfc/proxy";
+                    var proxyContent = new StringContent(rawBody, Encoding.UTF8);
+                    proxyContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+
+                    var proxyReq = new HttpRequestMessage(HttpMethod.Post, proxyUrl) { Content = proxyContent };
+                    proxyReq.Headers.Add("X-RFC-Key", "v2-rfc-proxy-2026");
+
+                    var proxyResp = await _http.SendAsync(proxyReq).ConfigureAwait(false);
+                    string proxyRaw = await proxyResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                    if (!string.IsNullOrEmpty(proxyRaw) && proxyRaw.TrimStart().StartsWith("{"))
+                    {
+                        sw.Stop();
+                        LogAndReturn(opcode + "#pathC", (long)sw.ElapsedMilliseconds, proxyRaw, true, store);
+                        var pathCResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                        pathCResp.Content = new StringContent(proxyRaw, Encoding.UTF8, "application/json");
+                        pathCResp.Headers.Add("X-Cache", "MISS");
+                        pathCResp.Headers.Add("X-Path", "C");
+                        return pathCResp;
+                    }
+                }
+                catch { /* Path C failed — return Path B's response */ }
+            }
+
             LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, store);
             var httpOut = Request.CreateResponse(System.Net.HttpStatusCode.OK);
             httpOut.Content = new StringContent(jsonOut, Encoding.UTF8, "application/json");

@@ -23,3 +23,1029 @@ namespace V2HHTMiddleware.Controllers.HHT
         private const string APK_VERSION = "12.108";
         private const string APK_URL     = "https://apk.v2retail.net/download";
         private const string MW_VERSION  = "v2-hht-azure|5.0";
+
+        // Persistent stats file — survives App Service restarts (D:\home is mounted storage)
+        private static readonly string STATS_FILE =
+            Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? @"D:\home",
+                         "data", "hht_opcode_stats.json");
+
+        // ── HTTP client ────────────────────────────────────────────────────────
+        private static readonly HttpClient _http;
+        private static volatile string _javaBase = null;
+        private static readonly object _discoveryLock = new object();
+
+        // ── In-memory ring buffer (last 1000 calls) ────────────────────────────
+        private static readonly ConcurrentQueue<CallLog> _ring = new ConcurrentQueue<CallLog>();
+        private const int RING_MAX = 1000;
+
+        // ── Plant / Store name cache (code → short name from Supabase) ──────────
+        // Populated on startup by static constructor; refreshable via POST /refresh-plants.
+        private static readonly Dictionary<string, string> _plantNames =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // ── Response cache — read-only opcodes with 60s TTL ────────────────────
+        private sealed class CacheEntry { public string Body; public DateTime Expires; }
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CacheEntry>
+            _cache = new System.Collections.Concurrent.ConcurrentDictionary<string, CacheEntry>(StringComparer.OrdinalIgnoreCase);
+        private static readonly TimeSpan CACHE_TTL = TimeSpan.FromSeconds(60);
+        // Only cache opcodes that return near-static master/reference data
+        private static readonly HashSet<string> CACHEABLE = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "storegetbin", "storegetbin_v2", "zwm_store_get_bin", "zwm_store_get_bin_v2",
+            "packgingmaterial", "packingmaterial",
+            "zwm_store_get_major_cat", "zwm_store_get_major_cat_data",
+            "zwm_get_msa_section_list", "zwm_get_packing_material",
+            "getsloc", "validatesloc", "zwm_rfc_validate_dc_sloc",
+            "zfms_screen", "zwm_get_grc_bins"
+        };
+        private static string CacheKey(string opcode, string store) => opcode + "|" + (store ?? "?");
+        private static bool TryGetCache(string opcode, string store, out string body)
+        {
+            body = null;
+            if (!CACHEABLE.Contains(opcode)) return false;
+            if (_cache.TryGetValue(CacheKey(opcode, store), out var e) && e.Expires > DateTime.UtcNow)
+            { body = e.Body; return true; }
+            return false;
+        }
+        private static void SetCache(string opcode, string store, string body)
+        {
+            if (!CACHEABLE.Contains(opcode) || string.IsNullOrEmpty(body)) return;
+            // Don't cache error responses
+            if (body.Contains("E#") || body.Length < 10) return;
+            _cache[CacheKey(opcode, store)] = new CacheEntry { Body = body, Expires = DateTime.UtcNow.Add(CACHE_TTL) };
+            // Evict expired entries periodically (every ~100 cache writes)
+            if (_cache.Count > 200)
+            {
+                var expired = _cache.Where(kv => kv.Value.Expires <= DateTime.UtcNow).Select(kv => kv.Key).ToList();
+                foreach (var k in expired) _cache.TryRemove(k, out _);
+            }
+        }
+
+        // Active device sessions: key=userId, value=last seen info
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession> _sessions
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, DeviceSession>(StringComparer.OrdinalIgnoreCase);
+
+        // ── Per-opcode stats — loaded from disk on startup, flushed every 60s ──
+        private static readonly ConcurrentDictionary<string, OpcodeStats> _opcodeStats
+            = new ConcurrentDictionary<string, OpcodeStats>(StringComparer.OrdinalIgnoreCase);
+
+        // All 117 registered opcodes (for "registered vs active" display)
+        private static readonly HashSet<string> ALL_OPCODES = new HashSet<string>(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            "scnrec","scnsel","storegetbin","zwm_store_get_bin","storegetbin_v2",
+            "zwm_store_get_bin_v2","storegetbinstock","getstorestock","getstorestocktake",
+            "getmatbinstock","getmatbinstockbtob","validatebin","validatesloc","getsloc",
+            "store_get_mat_from_ean","zwm_store_get_mat_from_ean","validatestablestocktakeid",
+            "validatestablestocktakeid_mc","validatestoreean","validatestoreean_v2",
+            "articledetails","packgingmaterial","zwm_store_get_major_cat",
+            "zwm_store_get_major_cat_data","zwm_store_bin_list_validation",
+            "zwm_store_binconhu_get_details","zwm_save_empty_bin","zwm_validate_empty_bin",
+            "zwm_vali_crate_emptybin","getstorepicklist","getstorepicklist_v2",
+            "zwm_picklist_nos_disp","savedirectpicking","savedirectpicking_v2",
+            "zhhtusr_del_picking_rfc","zwm_store_bin_con_picking_hu","get_v01_001s_post",
+            "get_v01_001s_stock","hugetdetails","hudetails","gethus","savehus",
+            "savehuassign","savehudetails","zwm_store_hu_validate","zwm_hu_quan",
+            "zwm_validate_external_hu","savegrcputway","savefloorputway","savefloorputwaytake",
+            "zwm_floor_puaway_new","zwm_store_floor_putway_hu","zwm_store_hu_putway_bin_con",
+            "savegrtmsa","savegrtfromdisplay","zwm_grt_save","zwm_grt_putway_crate_validation",
+            "zwm_grt_putway_post","zwm_store_get_grtstock","zwm_rfc_validate_crate",
+            "zwm_get_grc_bins","zwm_save_grc_to_data","stocktakegetdetails","stocktakesavedata",
+            "stockvalidatebarcode","zwm_rfc_stock_take_bin_vali","zwm_rfc_stock_take_arti_vali",
+            "zwm_rfc_stock_take_crate_vali","zwm_rfc_stock_take_save_v11",
+            "zwm_store_0001_stock_take","store_0001_stock_take","zwm_store_0001_reverse_stock",
+            "zwm_rfc_store_ean_data_stk","zwm_rfc_stock_movement_v21","zwm_rfc_stock_validate_v21",
+            "zwm_store_pushdatatosap_1total","zwm_store_pushdatatosap_1dis","pushdatatosap01stock",
+            "zhwm_store_pushdatasap_1stock","savebtob","savesloctoslocwwm",
+            "zwm_store_transfer_bin_to_bin","zwm_store_trf_0001_to_0010","store_trf_0001_to_0010",
+            "storestidpost","storestidpost_mc","validategandola_mc","savecrate","validatecrateto",
+            "zstore_discount_store_vali","zstore_discount_get_ean_data","zstore_discount_save_ean_data",
+            "nitrec","nitupd","nitdel","disrec","scndelivery","zwm_get_sto_data",
+            "zwm_validate_dc_sloc","zwm_dc_hu_grt_val","zwm_dc_hugrt_binhu_val",
+            "zwm_dc_hugrt_hu_val","zwm_dc_hugrt_save","getgrdetails","createto",
+            "zwm_to_get_details","zwm_to_scan_data_save","zwm_to_create_from_gr_data",
+            "zwm_cla_palette_validate","zwm_cla_hu_validate","zwm_cla_bin_validate",
+            "zwm_cla_hu_palette_save","zwm_cla_palette_bin_tag_save","zwm_huput31_save",
+            "zrfc_sdc_put31","zrfc_sdc_put31_bin_validation","zwm_rfc_get_ean_stid_mc",
+            "zwm_rfc_stock_movement_v21","zwm_store_get_grtstock",
+            "pushdatatosap01stock","zhwm_store_pushdatasap_1stock"
+        };
+
+        private static readonly Timer _flushTimer;
+        private static readonly object _fileLock = new object();
+        private static bool _statsLoaded = false;
+
+        static HHTController()
+        {
+            var handler = new HttpClientHandler
+            {
+                MaxConnectionsPerServer = 300,
+                UseProxy = false,
+                AllowAutoRedirect = false
+            };
+            _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(55) };
+
+            // Load persisted stats from disk immediately
+            LoadStatsFromDisk();
+
+            // Flush stats to disk every 60 seconds
+            _flushTimer = new Timer(_ => FlushStatsToDisk(), null,
+                TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // ROUTES
+        // ═══════════════════════════════════════════════════════════════════════
+
+        [HttpPost, Route("")]
+        public Task<HttpResponseMessage> Handle() => Proxy();
+
+        [HttpPost, Route("ValueXMW")]
+        public Task<HttpResponseMessage> ValueXMW() => Proxy();
+
+        [HttpPost, Route("ValueXMW/{app}")]
+        public Task<HttpResponseMessage> ValueXMWApp(string app) => Proxy();
+
+        [HttpPost, Route("ValueXMW/{app}/{platform}/{version}")]
+        public Task<HttpResponseMessage> ValueXMWFull(string app, string platform, string version) => Proxy();
+
+        [HttpPost, Route("~/ValueXMW/{app}/{platform}/{version}")]
+        public Task<HttpResponseMessage> ValueXMWRoot(string app, string platform, string version) => Proxy();
+
+
+        // ── v12+ app ─────────────────────────────────────────────────────────
+        [HttpPost, Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJson()    => ProxyNoAcl();
+        [HttpGet,  Route("noacljsonrfcadaptor")]
+        public Task<HttpResponseMessage> NoAclJsonGet() => ProxyNoAcl();
+
+        // ── index.jsp / ping — v12 IPActivity connectivity check ──────────
+        [HttpGet, Route("index.jsp")]
+        public HttpResponseMessage IndexJspGet()
+        {
+            return Json("ok");
+        }
+
+        [HttpGet, Route("ping")]
+        public HttpResponseMessage Ping()
+        {
+            return Json("ok");
+        }
+
+
+        // ── MIN version — bump this to force all devices below it to upgrade ──
+        // ══════════════════════════════════════════════════════════════════════════
+        // MIN_APK_VERSION controls force-upgrade on all ~1000 devices.
+        // Setting this ABOVE "1.0" will trigger auto-download + install on
+        // every device below that version — stopping warehouse operations.
+        //
+        // ONLY change this after:
+        //   1. All devices are confirmed on the new cert
+        //   2. Explicit sign-off from Akash
+        //   3. Outside working hours
+        //
+        // DO NOT change this when bumping APK_VERSION. They are independent.
+        // ══════════════════════════════════════════════════════════════════════
+        private const string MIN_APK_VERSION = "1.0"; // DISABLED — DO NOT RAISE
+        private static int CmpVer(string a, string b) {
+            try {
+                var pa=a.Split('.'); var pb=b.Split('.');
+                for(int i=0;i<Math.Max(pa.Length,pb.Length);i++){
+                    int va=i<pa.Length?int.Parse(pa[i]):0,vb=i<pb.Length?int.Parse(pb[i]):0;
+                    if(va!=vb)return va-vb;
+                } return 0;
+            }catch{return 0;}
+        }
+
+        
+        // ── GET /api/hht/plants ────────────────────────────────────────────────
+        [HttpGet, Route("plants")]
+        public async Task<IHttpActionResult> GetPlants()
+        {
+            if (_plantNames.Count == 0)
+                await LoadPlantNamesAsync();
+            return Ok(_plantNames);
+        }
+
+        [HttpPost, Route("refresh-plants")]
+        public async Task<IHttpActionResult> RefreshPlants()
+        {
+            _plantNames.Clear();
+            int count = await LoadPlantNamesAsync();
+            return Ok(new { refreshed = count, message = "Plant names reloaded from Supabase" });
+        }
+
+        private static readonly SemaphoreSlim _plantLock = new SemaphoreSlim(1, 1);
+        private static async Task<int> LoadPlantNamesAsync()
+        {
+            await _plantLock.WaitAsync();
+            try
+            {
+                if (_plantNames.Count > 0) return _plantNames.Count;
+
+                const string ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB5bWRxbm53d3hyZ2VvbHZndmd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMzMzU0NzYsImV4cCI6MjA2ODkxMTQ3Nn0.jUrb0jIg6qjj2Rlh9DxYesSnbstoD4uoDCswqOqAkUM";
+                const string URL      = "https://pymdqnnwwxrgeolvgvgv.supabase.co/rest/v1/store_plant_master_aka?select=STORE-CODE,STORE-NAME&limit=1000";
+
+                using (var req = new HttpRequestMessage(HttpMethod.Get, URL))
+                {
+                    req.Headers.Add("apikey",        ANON_KEY);
+                    req.Headers.Add("Authorization", "Bearer " + ANON_KEY);
+                    var resp = await _http.SendAsync(req);
+                    if (!resp.IsSuccessStatusCode) return 0;
+
+                    var body = await resp.Content.ReadAsStringAsync();
+                    var rows = Newtonsoft.Json.JsonConvert.DeserializeObject<
+                        List<Dictionary<string, string>>>(body);
+
+                    int count = 0;
+                    foreach (var row in rows ?? new List<Dictionary<string, string>>())
+                    {
+                        var code = row.ContainsKey("STORE-CODE") ? (row["STORE-CODE"] ?? "").Trim().ToUpper() : "";
+                        var name = row.ContainsKey("STORE-NAME") ? (row["STORE-NAME"] ?? "").Trim()           : "";
+                        if (!string.IsNullOrEmpty(code) && !string.IsNullOrEmpty(name))
+                        {
+                            _plantNames[code] = name;
+                            count++;
+                        }
+                    }
+                    return count;
+                }
+            }
+            catch { return 0; }
+            finally { _plantLock.Release(); }
+        }
+
+        [HttpGet, Route("appversion")]
+        public HttpResponseMessage AppVersion()
+        {
+            var qs=System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
+            var maj=qs["majorVersion"]??""; var min=qs["minorVersion"]??"";
+            var dv=(maj.Length>0&&min.Length>0)?maj+"."+min:APK_VERSION;
+            var upg=CmpVer(dv,MIN_APK_VERSION)<0?"available":"none";
+            return Json($"{{\"upgrade\":\"{upg}\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+        }
+
+        [HttpGet, Route("ValueXMW/appversion")]
+        public HttpResponseMessage AppVersionLegacy()
+        {
+            var qs=System.Web.HttpUtility.ParseQueryString(Request.RequestUri.Query);
+            var maj=qs["majorVersion"]??""; var min=qs["minorVersion"]??"";
+            var dv=(maj.Length>0&&min.Length>0)?maj+"."+min:APK_VERSION;
+            var upg=CmpVer(dv,MIN_APK_VERSION)<0?"available":"none";
+            return Json($"{{\"upgrade\":\"{upg}\",\"version\":\"{APK_VERSION}\",\"downloadLink\":\"{APK_URL}\"}}");
+        }
+
+        [HttpGet, Route("health")]
+        public async Task<HttpResponseMessage> Health()
+        {
+            string javaBase   = GetJavaBase();
+            string javaStatus = "unreachable";
+            if (javaBase != null)
+            {
+                try
+                {
+                    var sw = Stopwatch.StartNew();
+                    var r  = await _http.GetAsync(javaBase.Replace("/xmwgw", "") + "/index.jsp").ConfigureAwait(false);
+                    sw.Stop();
+                    javaStatus = $"ok:{(int)r.StatusCode}:{sw.ElapsedMilliseconds}ms";
+                }
+                catch (Exception ex)
+                {
+                    javaStatus = "err:" + ex.Message.Substring(0, Math.Min(60, ex.Message.Length)).Replace("\n", " ");
+                }
+            }
+
+            int activeOpcodes     = _opcodeStats.Count;
+            int registeredOpcodes = ALL_OPCODES.Count;
+            long totalCalls       = _opcodeStats.Values.Sum(s => s.Count);
+
+            return Txt(
+                $"OK|{MW_VERSION}" +
+                $"|apk={APK_VERSION}" +
+                $"|java={javaBase ?? "not-discovered"}" +
+                $"|java={javaStatus}" +
+                $"|calls_total={totalCalls}" +
+                $"|active_opcodes={activeOpcodes}" +
+                $"|registered_opcodes={registeredOpcodes}" +
+                $"|stats_persisted={_statsLoaded}" +
+                $"|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC"
+            );
+        }
+
+        [HttpGet, Route("stats")]
+        public HttpResponseMessage Stats()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("=== V2 HHT Azure Middleware — Live Stats ===");
+            sb.AppendLine($"Time           : {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+            sb.AppendLine($"MW Version     : {MW_VERSION}");
+            sb.AppendLine($"Java Base      : {_javaBase ?? "not-discovered"}");
+            sb.AppendLine($"Stats persisted: {_statsLoaded} (file: {STATS_FILE})");
+            sb.AppendLine();
+
+            int    active     = _opcodeStats.Count;
+            int    registered = ALL_OPCODES.Count;
+            long   total      = _opcodeStats.Values.Sum(s => s.Count);
+            long   errors     = _opcodeStats.Values.Sum(s => s.Errors);
+
+            sb.AppendLine($"Registered opcodes : {registered}");
+            sb.AppendLine($"Active opcodes     : {active} (called at least once)");
+            sb.AppendLine($"Never-called       : {registered - active} (not yet used in current period)");
+            sb.AppendLine($"Total RFC calls    : {total}");
+            sb.AppendLine($"Infra errors       : {errors}");
+            sb.AppendLine();
+
+            sb.AppendLine("ACTIVE OPCODE PERFORMANCE:");
+            sb.AppendLine($"{"Opcode",-42} {"Calls",6} {"Errors",6} {"Avg ms",8} {"Min ms",8} {"Max ms",8} {"P95 ms",8} {"LastSeen",19}");
+            sb.AppendLine(new string('-', 115));
+            foreach (var kv in _opcodeStats.OrderByDescending(x => x.Value.Count))
+            {
+                var s = kv.Value;
+                sb.AppendLine($"{kv.Key,-42} {s.Count,6} {s.Errors,6} {s.AvgMs,8:F0} {s.MinMs,8:F0} {s.MaxMs,8:F0} {s.P95Ms,8:F0} {s.LastSeen:yyyy-MM-dd HH:mm:ss}");
+            }
+
+            sb.AppendLine();
+            sb.AppendLine("NEVER-CALLED OPCODES (registered but 0 calls this period):");
+            var neverCalled = ALL_OPCODES.Where(o => !_opcodeStats.ContainsKey(o)).OrderBy(o => o).ToList();
+            sb.AppendLine(string.Join(", ", neverCalled));
+
+            sb.AppendLine();
+            sb.AppendLine("LAST 500 CALLS:");
+            sb.AppendLine($"{"Timestamp",-20} {"User",-8} {"Opcode",-35} {"Store",-6} {"Ms",6} {"OK",4} {"Resp",40}");
+            sb.AppendLine(new string('-', 125));
+            var recent = _ring.ToArray();
+            int ringCount = Math.Min(recent.Length, 500);
+            for (int i = recent.Length - 1; i >= recent.Length - ringCount; i--)
+            {
+                var c = recent[i];
+                string uid = string.IsNullOrEmpty(c.UserId) ? "-" : c.UserId;
+                sb.AppendLine($"{c.Timestamp.ToString("HH:mm:ss.fff"),-20} {uid,-8} {c.Opcode,-35} {c.Store,-6} {c.ElapsedMs,6} {(c.SapOk?"✅":"❌"),4}  {c.ResponseSnippet,-40}");
+            }
+
+            return Txt(sb.ToString());
+        }
+
+        [HttpGet, Route("cache/stats")]
+        public HttpResponseMessage CacheStats()
+        {
+            var now = DateTime.UtcNow;
+            var live  = _cache.Where(kv => kv.Value.Expires > now).ToList();
+            var data  = live.Select(kv => new {
+                key     = kv.Key,
+                expires = kv.Value.Expires.ToString("HH:mm:ss"),
+                ttl_sec = (int)(kv.Value.Expires - now).TotalSeconds
+            }).OrderBy(x => x.key).ToList();
+            return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new {
+                live_entries   = live.Count,
+                total_entries  = _cache.Count,
+                cacheable_ops  = CACHEABLE.Count,
+                ttl_seconds    = (int)CACHE_TTL.TotalSeconds,
+                entries        = data
+            }));
+        }
+
+        [HttpPost, Route("cache/clear")]
+        public HttpResponseMessage CacheClear()
+        {
+            _cache.Clear();
+            return Json(@"{""cleared"":true}");
+        }
+
+        [HttpGet, Route("sessions")]
+        public HttpResponseMessage Sessions()
+        {
+            var cutoff = DateTime.UtcNow.AddMinutes(-60);
+            var active = _sessions.Values
+                .Where(s => s.LastSeen >= cutoff)
+                .OrderByDescending(s => s.LastSeen)
+                .Select(s => new {
+                    user_id        = s.UserId,
+                    store          = s.Store,
+                    last_opcode    = s.LastOpcode,
+                    last_seen      = s.LastSeen.ToString("HH:mm:ss"),
+                    last_seen_mins = (int)(DateTime.UtcNow - s.LastSeen).TotalMinutes,
+                    call_count     = s.CallCount,
+                    active         = (DateTime.UtcNow - s.LastSeen).TotalMinutes < 5
+                }).ToList();
+
+            var now = DateTime.UtcNow;
+            int devLive  = _deviceSerials.Values.Count(t => (now - t).TotalMinutes < 5);
+            int dev30m   = _deviceSerials.Values.Count(t => (now - t).TotalMinutes < 30);
+            int devTotal = _deviceSerials.Count;
+
+            return Json(Newtonsoft.Json.JsonConvert.SerializeObject(new { sessions = active, total = active.Count, device_count_live = devLive, device_count_30m = dev30m, device_count_total = devTotal }));
+        }
+
+        [HttpGet, Route("stats/{opcode}")]
+        public HttpResponseMessage StatsOpcode(string opcode)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"=== Opcode: {opcode} ===");
+            sb.AppendLine($"Registered: {(ALL_OPCODES.Contains(opcode) ? "YES" : "NO — not in router")}");
+            if (_opcodeStats.TryGetValue(opcode, out var s))
+            {
+                sb.AppendLine($"Status     : ACTIVE");
+                sb.AppendLine($"Total calls: {s.Count}");
+                sb.AppendLine($"Errors     : {s.Errors}");
+                sb.AppendLine($"Avg latency: {s.AvgMs:F0}ms");
+                sb.AppendLine($"Min latency: {s.MinMs:F0}ms");
+                sb.AppendLine($"Max latency: {s.MaxMs:F0}ms");
+                sb.AppendLine($"P95 latency: {s.P95Ms:F0}ms");
+                sb.AppendLine($"Last error : {s.LastError ?? "none"}");
+                sb.AppendLine($"Last seen  : {s.LastSeen:yyyy-MM-dd HH:mm:ss} UTC");
+            }
+            else sb.AppendLine($"Status     : NEVER CALLED");
+            sb.AppendLine();
+            sb.AppendLine("Recent calls:");
+            var calls = _ring.ToArray();
+            int shown = 0;
+            for (int i = calls.Length - 1; i >= 0 && shown < 30; i--)
+            {
+                var c = calls[i];
+                if (!c.Opcode.Equals(opcode, StringComparison.OrdinalIgnoreCase)) continue;
+                sb.AppendLine($"  {c.Timestamp:HH:mm:ss}  Store={c.Store}  {c.ElapsedMs}ms  {(c.SapOk?"✅":"❌")}  {c.ResponseSnippet}");
+                shown++;
+            }
+            if (shown == 0) sb.AppendLine("  No recent calls in ring buffer.");
+            return Txt(sb.ToString());
+        }
+
+        [HttpPost, Route("stats/flush")]
+        public HttpResponseMessage FlushStats()
+        {
+            FlushStatsToDisk();
+            return Txt($"Flushed {_opcodeStats.Count} opcodes to {STATS_FILE}");
+        }
+
+        [HttpPost, Route("stats/reset")]
+        public HttpResponseMessage ResetStats()
+        {
+            _opcodeStats.Clear();
+            while (_ring.TryDequeue(out _)) { }
+            FlushStatsToDisk();
+            return Txt("Stats reset and file cleared.");
+        }
+
+        private async Task<HttpResponseMessage> Proxy()
+        {
+            string javaBase = GetJavaBase();
+            if (javaBase == null)
+                return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
+
+            string body   = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (body.TrimStart().StartsWith("{"))
+                return await ProxyNoAcl(body).ConfigureAwait(false);
+
+            string opcode  = ExtractOpcode(body);
+            string store   = ExtractStore(body);
+            string userId  = ExtractUserId(body);
+
+            string deviceSerial = "";
+            try {
+                var sHdr = Request.Headers.GetValues("X-HHT-Serial");
+                if (sHdr != null) deviceSerial = sHdr.FirstOrDefault()?.Trim() ?? "";
+            } catch { }
+            if (!string.IsNullOrEmpty(deviceSerial)) {
+                _deviceSerials[deviceSerial + ":" + (store ?? "?")] = DateTime.UtcNow;
+                var cutoffS = DateTime.UtcNow.AddMinutes(-60);
+                foreach (var k in _deviceSerials.Keys.ToList())
+                    if (_deviceSerials.TryGetValue(k, out var ts) && ts < cutoffS) _deviceSerials.TryRemove(k, out _);
+            }
+
+            if (TryGetCache(opcode, store, out string cachedBody))
+            {
+                LogAndReturn(opcode, 0, cachedBody, true, store, userId);
+                var cachedResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                cachedResp.Content = new StringContent(cachedBody, Encoding.UTF8, "application/json");
+                cachedResp.Headers.Add("X-Cache", "HIT");
+                return cachedResp;
+            }
+
+            var    sw      = Stopwatch.StartNew();
+            string respBody;
+            bool   sapOk;
+
+            try
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "text/plain")
+                };
+                foreach (var h in Request.Headers)
+                    if (h.Key.StartsWith("X-HHT-", StringComparison.OrdinalIgnoreCase))
+                        req.Headers.TryAddWithoutValidation(h.Key, h.Value);
+
+                var resp  = await _http.SendAsync(req).ConfigureAwait(false);
+                sw.Stop();
+                respBody  = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk     = IsInfraOk(respBody);
+            }
+            catch (TaskCanceledException)
+            {
+                sw.Stop();
+                respBody = "E#SAP timeout — RFC did not respond in 55s";
+                sapOk    = false;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                respBody = "E#Proxy error: " + ex.Message.Replace("\n", " ");
+                sapOk    = false;
+            }
+
+            if (sapOk) SetCache(opcode, store, respBody);
+            return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store, userId);
+        }
+
+        private HttpResponseMessage LogAndReturn(string opcode, long ms, string resp, bool ok, string store, string userId = "")
+        {
+            if (opcode != null)
+            {
+                var entry = new CallLog
+                {
+                    Timestamp       = DateTime.UtcNow,
+                    Opcode          = opcode,
+                    Store           = store ?? "?",
+                    UserId          = userId ?? "",
+                    ElapsedMs       = ms,
+                    SapOk           = ok,
+                    ResponseSnippet = (resp ?? "").Length > 60 ? resp.Substring(0, 60) : resp ?? ""
+                };
+                _ring.Enqueue(entry);
+                while (_ring.Count > RING_MAX) _ring.TryDequeue(out _);
+
+                bool isRealStore = store != null && store != "?" 
+                                   && store.Length >= 2 && store.Length <= 6
+                                   && !store.Contains("_")
+                                   && store != opcode
+                                   && !store.Equals("scnrec", StringComparison.OrdinalIgnoreCase);
+                var sessionKey = !string.IsNullOrEmpty(userId) ? userId
+                                : isRealStore ? "S:" + store : null;
+                if (sessionKey != null)
+                {
+                    var displayId = !string.IsNullOrEmpty(userId) ? userId : store;
+                    _sessions.AddOrUpdate(sessionKey,
+                        _ => new DeviceSession { UserId = displayId, Store=store??"?", LastOpcode=opcode, LastSeen=DateTime.UtcNow, CallCount=1 },
+                        (_, s) => { s.Store=store??"?"; s.LastOpcode=opcode; s.LastSeen=DateTime.UtcNow; s.CallCount++; return s; });
+                }
+
+                _opcodeStats.AddOrUpdate(opcode,
+                    _ => new OpcodeStats(ms, ok, ok ? null : (resp ?? "").Substring(0, Math.Min(80, (resp ?? "").Length))),
+                    (_, existing) => { existing.Record(ms, ok, ok ? null : (resp ?? "").Substring(0, Math.Min(80, (resp ?? "").Length))); return existing; });
+
+                var snip = (resp ?? "").Replace("\n"," ").Replace("|",":");
+                if (snip.Length > 80) snip = snip.Substring(0, 80);
+                Console.WriteLine($"[HHT] {DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}|{opcode}|{store}|{ms}|{(ok?"OK":"ERR")}|{snip}");
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(resp ?? "", Encoding.UTF8, "text/plain")
+            };
+        }
+
+        private static void LoadStatsFromDisk()
+        {
+            try
+            {
+                if (!File.Exists(STATS_FILE)) { _statsLoaded = false; return; }
+                var json = File.ReadAllText(STATS_FILE);
+                var dict = JsonConvert.DeserializeObject<Dictionary<string, PersistedStats>>(json);
+                if (dict == null) { _statsLoaded = false; return; }
+                foreach (var kv in dict)
+                {
+                    var p = kv.Value;
+                    var s = new OpcodeStats((long)p.MinMs, true, null);
+                    s.RestoreFrom(p);
+                    _opcodeStats[kv.Key] = s;
+                }
+                _statsLoaded = true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[HHT-PERSIST] Load error: {ex.Message}");
+                _statsLoaded = false;
+            }
+        }
+
+        private static void FlushStatsToDisk()
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(STATS_FILE);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                var dict = new Dictionary<string, PersistedStats>();
+                foreach (var kv in _opcodeStats)
+                {
+                    var s = kv.Value;
+                    dict[kv.Key] = new PersistedStats
+                    {
+                        Count     = s.Count,
+                        Errors    = s.Errors,
+                        MinMs     = s.MinMs,
+                        MaxMs     = s.MaxMs,
+                        AvgMs     = s.AvgMs,
+                        P95Ms     = s.P95Ms,
+                        LastError = s.LastError,
+                        LastSeen  = s.LastSeen.ToString("o")
+                    };
+                }
+
+                var json = JsonConvert.SerializeObject(dict);
+                lock (_fileLock)
+                {
+                    File.WriteAllText(STATS_FILE + ".tmp", json);
+                    if (File.Exists(STATS_FILE)) File.Delete(STATS_FILE);
+                    File.Move(STATS_FILE + ".tmp", STATS_FILE);
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"[HHT-PERSIST] Flush error: {ex.Message}"); }
+        }
+
+        private static string GetJavaBase()
+        {
+            if (_javaBase != null) return _javaBase;
+            lock (_discoveryLock)
+            {
+                if (_javaBase != null) return _javaBase;
+                var found = new ConcurrentBag<int>();
+                var tasks = new List<Task>();
+                for (int i = 1; i <= 254; i++)
+                {
+                    int idx = i;
+                    tasks.Add(Task.Run(() =>
+                    {
+                        try
+                        {
+                            using (var sock = new System.Net.Sockets.Socket(
+                                System.Net.Sockets.AddressFamily.InterNetwork,
+                                System.Net.Sockets.SocketType.Stream,
+                                System.Net.Sockets.ProtocolType.Tcp))
+                            {
+                                sock.Blocking = false;
+                                try { sock.Connect($"127.0.0.{idx}", 9080); } catch { }
+                                var w = new List<System.Net.Sockets.Socket> { sock };
+                                var e = new List<System.Net.Sockets.Socket> { sock };
+                                System.Net.Sockets.Socket.Select(null, w, e, 200000);
+                                if (w.Count > 0 && e.Count == 0) found.Add(idx);
+                            }
+                        }
+                        catch { }
+                    }));
+                }
+                Task.WaitAll(tasks.ToArray(), 4000);
+                int best = int.MaxValue;
+                foreach (var x in found) if (x < best) best = x;
+                _javaBase = best < int.MaxValue ? $"http://127.0.0.{best}:9080/xmwgw" : null;
+                return _javaBase;
+            }
+        }
+
+        private static string ExtractOpcode(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return "unknown";
+            int idx = body.IndexOf('#');
+            return idx > 0 ? body.Substring(0, idx).Trim().ToLowerInvariant() : body.Trim().ToLowerInvariant();
+        }
+
+        private static string ExtractStore(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return "?";
+            if (body.TrimStart().StartsWith("{"))
+            {
+                try {
+                    var j = Newtonsoft.Json.Linq.JObject.Parse(body);
+                    var werks = j["IM_WERKS"]?.ToString() ?? j["im_werks"]?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(werks)) return werks;
+                    foreach (var kv in j)
+                        if (kv.Value?.ToString().Length >= 3 && kv.Value.ToString().Length <= 6
+                            && (kv.Value.ToString().StartsWith("H") || kv.Value.ToString().StartsWith("DH")))
+                            return kv.Value.ToString();
+                } catch { }
+                return "?";
+            }
+            var parts = body.Split('#');
+            if (parts.Length >= 4 && parts[0].Equals("scnrec", StringComparison.OrdinalIgnoreCase)) return parts[3];
+            if (parts.Length >= 2 && parts[1].Length >= 3 && parts[1].Length <= 6
+                && (parts[1].StartsWith("H") || parts[1].StartsWith("DH") || parts[1].StartsWith("h")))
+                return parts[1];
+            return "?";
+        }
+
+        private static string ExtractUserId(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return "";
+            if (body.TrimStart().StartsWith("{"))
+            {
+                try {
+                    var j = Newtonsoft.Json.Linq.JObject.Parse(body);
+                    return j["im_userid"]?.ToString() ?? j["IM_USERID"]?.ToString()
+                        ?? j["im_password"]?.ToString() ?? j["IM_PASSWORD"]?.ToString() ?? "";
+                } catch { }
+                return "";
+            }
+            var parts = body.Split('#');
+            return parts.Length >= 2 ? parts[1] : "";
+        }
+
+        private static bool IsInfraOk(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return true;
+            var r = resp.TrimStart();
+            return !r.StartsWith("E#HC tunnel") && !r.StartsWith("E#Proxy error") &&
+                   !r.StartsWith("E#SAP timeout") && !r.StartsWith("E#not-discovered");
+        }
+
+        private static HttpResponseMessage Txt(string s) =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent(s, Encoding.UTF8, "text/plain") };
+
+        private static HttpResponseMessage Json(string s) =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent(s, Encoding.UTF8, "application/json") };
+
+        private class CallLog
+        {
+            public DateTime Timestamp       { get; set; }
+            public string   Opcode          { get; set; }
+            public string   Store           { get; set; }
+            public string   UserId          { get; set; }
+            public long     ElapsedMs       { get; set; }
+            public bool     SapOk           { get; set; }
+            public string   ResponseSnippet { get; set; }
+        }
+
+        class DeviceSession
+        {
+            public string   UserId      { get; set; }
+            public string   Store       { get; set; }
+            public string   LastOpcode  { get; set; }
+            public DateTime LastSeen    { get; set; }
+            public int      CallCount   { get; set; }
+            public string   ClientIp    { get; set; }
+        }
+
+        private static readonly ConcurrentDictionary<string, DateTime> _deviceSerials
+            = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly ConcurrentDictionary<string, DateTime> _deviceIps
+            = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        public class PersistedStats
+        {
+            public long   Count     { get; set; }
+            public long   Errors    { get; set; }
+            public double MinMs     { get; set; }
+            public double MaxMs     { get; set; }
+            public double AvgMs     { get; set; }
+            public double P95Ms     { get; set; }
+            public string LastError { get; set; }
+            public string LastSeen  { get; set; }
+        }
+
+        private async Task<HttpResponseMessage> ProxyNoAcl(string preReadBody = null)
+        {
+            string javaBase = GetJavaBase();
+            if (javaBase == null)
+                return LogAndReturn("noacl", 0, "E#HC tunnel down", false, "?");
+
+            string rawBody = preReadBody ?? await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            string bapi  = "";
+            var imVals   = new System.Collections.Generic.List<string>();
+            try
+            {
+                var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                bapi = jobj["bapiname"]?.ToString() ?? "";
+                foreach (var kv in jobj)
+                    if (kv.Key.StartsWith("IM_", System.StringComparison.OrdinalIgnoreCase))
+                        imVals.Add(kv.Value?.ToString() ?? "");
+            }
+            catch { }
+
+            var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "");
+            if (string.IsNullOrEmpty(bapi)) bapi = qs["bapiname"] ?? "noacl";
+
+            string opcode  = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
+                             ? "scnrec" : bapi.ToLower();
+            string store   = ExtractStore(rawBody);
+            string userId  = ExtractUserId(rawBody);
+
+            var sw = Stopwatch.StartNew();
+
+            try
+            {
+                string noaclUrl = javaBase.Replace("/xmwgw", "/xmwgw/noacljsonrfcadaptor")
+                                  + "?" + (qs.Count > 0 ? qs.ToString() : "bapiname=" + bapi + "&aclclientid=android");
+
+                var noaclContent = new StringContent(rawBody, Encoding.UTF8);
+                noaclContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+
+                var noaclReq  = new HttpRequestMessage(HttpMethod.Post, noaclUrl) { Content = noaclContent };
+                var noaclResp = await _http.SendAsync(noaclReq).ConfigureAwait(false);
+                string noaclRaw = await noaclResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                if (!string.IsNullOrEmpty(noaclRaw) &&
+                    !noaclRaw.Contains("Only Applicaton/Json") &&
+                    !noaclRaw.Contains("Content Type Not supported") &&
+                    noaclRaw.TrimStart().StartsWith("{") &&
+                    noaclRaw.Trim() != "{}")
+                {
+                    sw.Stop();
+                    bool ok = IsInfraOk(noaclRaw);
+                    LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, store);
+                    if (ok) SetCache(opcode, "?", noaclRaw);
+                    var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                    nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
+                    nativeResp.Headers.Add("X-Cache", "MISS");
+                    return nativeResp;
+                }
+            }
+            catch { }
+
+            var legacySb = new System.Text.StringBuilder(opcode);
+            foreach (var v in imVals) legacySb.Append("#").Append(v);
+            legacySb.Append("#<eol>");
+
+            string respBody; bool sapOk;
+            try
+            {
+                var legReq = new HttpRequestMessage(HttpMethod.Post, javaBase + "/ValueXMW")
+                {
+                    Content = new StringContent(legacySb.ToString(), Encoding.UTF8, "application/json")
+                };
+                var legResp = await _http.SendAsync(legReq).ConfigureAwait(false);
+                sw.Stop();
+                respBody = await legResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk    = IsInfraOk(respBody);
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                return LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, "E#" + ex.Message, false, store);
+            }
+
+            string jsonOut = BuildSapJson(bapi, respBody ?? "");
+
+            bool pathBFailed = false;
+            try
+            {
+                var check = Newtonsoft.Json.Linq.JObject.Parse(jsonOut);
+                var exRet = check["EX_RETURN"] as Newtonsoft.Json.Linq.JObject;
+                pathBFailed = exRet != null &&
+                    "E".Equals(exRet["TYPE"]?.ToString(), StringComparison.OrdinalIgnoreCase) &&
+                    (exRet["MESSAGE"]?.ToString() ?? "").Contains("not supported");
+            }
+            catch { }
+
+            if (pathBFailed)
+            {
+                try
+                {
+                    string proxyUrl = "https://sap-api.v2retail.net/api/rfc/proxy";
+                    var proxyContent = new StringContent(rawBody, Encoding.UTF8);
+                    proxyContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                    var proxyReq = new HttpRequestMessage(HttpMethod.Post, proxyUrl) { Content = proxyContent };
+                    proxyReq.Headers.Add("X-RFC-Key", "v2-rfc-proxy-2026");
+                    var proxyResp = await _http.SendAsync(proxyReq).ConfigureAwait(false);
+                    string proxyRaw = await proxyResp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!string.IsNullOrEmpty(proxyRaw) && proxyRaw.TrimStart().StartsWith("{"))
+                    {
+                        sw.Stop();
+                        LogAndReturn(opcode + "#pathC", (long)sw.ElapsedMilliseconds, proxyRaw, true, store);
+                        var pathCResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                        pathCResp.Content = new StringContent(proxyRaw, Encoding.UTF8, "application/json");
+                        pathCResp.Headers.Add("X-Cache", "MISS");
+                        pathCResp.Headers.Add("X-Path", "C");
+                        return pathCResp;
+                    }
+                }
+                catch { }
+            }
+
+            LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, respBody, sapOk, store);
+            var httpOut = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            httpOut.Content = new StringContent(jsonOut, Encoding.UTF8, "application/json");
+            return httpOut;
+        }
+
+        private string BuildSapJson(string bapi, string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw.Trim().Equals("Response:null", StringComparison.OrdinalIgnoreCase))
+            {
+                var e0 = new Newtonsoft.Json.Linq.JObject();
+                e0["EX_RETURN"] = new Newtonsoft.Json.Linq.JObject(
+                    new Newtonsoft.Json.Linq.JProperty("TYPE",    "E"),
+                    new Newtonsoft.Json.Linq.JProperty("MESSAGE", "Operation not supported. Please update the app.")
+                );
+                return e0.ToString(Newtonsoft.Json.Formatting.None);
+            }
+
+            string payload = raw.StartsWith("Response:") ? raw.Substring(9) : raw;
+            if (payload.EndsWith("<eol>")) payload = payload.Substring(0, payload.Length - 5);
+            payload = payload.TrimEnd('#').Trim();
+
+            string[] parts  = payload.Split('#');
+            string   status = parts.Length > 0 ? parts[0].Trim() : "";
+
+            var obj = new Newtonsoft.Json.Linq.JObject();
+
+            if (status.Equals("E", StringComparison.OrdinalIgnoreCase) || status.Equals("0"))
+            {
+                string msg = parts.Length > 1
+                    ? string.Join(" ", parts, 1, parts.Length - 1).Trim()
+                    : (status == "0" ? "Authentication failed. Check your SAP credentials." : "SAP returned an error.");
+                obj["EX_RETURN"] = new Newtonsoft.Json.Linq.JObject(
+                    new Newtonsoft.Json.Linq.JProperty("TYPE",    "E"),
+                    new Newtonsoft.Json.Linq.JProperty("MESSAGE", msg)
+                );
+                return obj.ToString(Newtonsoft.Json.Formatting.None);
+            }
+
+            obj["EX_RETURN"] = new Newtonsoft.Json.Linq.JObject(
+                new Newtonsoft.Json.Linq.JProperty("TYPE",    "S"),
+                new Newtonsoft.Json.Linq.JProperty("MESSAGE", "")
+            );
+
+            if (bapi.Equals("ZWM_USER_AUTHORITY_CHECK", StringComparison.OrdinalIgnoreCase))
+            {
+                string werks = parts.Length > 1 ? parts[1].Trim() : "";
+                string group = werks.StartsWith("DH", StringComparison.OrdinalIgnoreCase) ? "DC" : "";
+                if (werks.Equals("DH25", StringComparison.OrdinalIgnoreCase)) group = "";
+                obj["EX_WERKS"] = werks;
+                obj["EX_GROUP"] = group;
+            }
+            else
+            {
+                obj["EX_RETURN"]["MESSAGE"] = raw;
+                var arr = new Newtonsoft.Json.Linq.JArray();
+                var row = new Newtonsoft.Json.Linq.JObject();
+                row["RESPONSE"] = raw;
+                arr.Add(row);
+                obj["EX_RETURN"]["ET_DATA"] = arr;
+            }
+
+            return obj.ToString(Newtonsoft.Json.Formatting.None);
+        }
+
+        private class OpcodeStats
+        {
+            private readonly object _lock = new object();
+            private readonly List<long> _samples = new List<long>(200);
+
+            public long     Count     { get; private set; }
+            public long     Errors    { get; private set; }
+            public double   MinMs     { get; private set; }
+            public double   MaxMs     { get; private set; }
+            public double   AvgMs     { get; private set; }
+            public double   P95Ms     { get; private set; }
+            public string   LastError { get; private set; }
+            public DateTime LastSeen  { get; private set; }
+
+            public OpcodeStats(long ms, bool ok, string err)
+            {
+                MinMs = MaxMs = AvgMs = P95Ms = ms;
+                Count = 1; Errors = ok ? 0 : 1; LastError = err;
+                LastSeen = DateTime.UtcNow; _samples.Add(ms);
+            }
+
+            public void Record(long ms, bool ok, string err)
+            {
+                lock (_lock)
+                {
+                    Count++;
+                    if (!ok) { Errors++; if (err != null) LastError = err; }
+                    if (ms < MinMs) MinMs = ms;
+                    if (ms > MaxMs) MaxMs = ms;
+                    AvgMs = (AvgMs * (Count - 1) + ms) / Count;
+                    LastSeen = DateTime.UtcNow;
+                    if (_samples.Count >= 200) _samples.RemoveAt(0);
+                    _samples.Add(ms);
+                    var sorted = new List<long>(_samples); sorted.Sort();
+                    P95Ms = sorted[Math.Max(0, (int)Math.Ceiling(sorted.Count * 0.95) - 1)];
+                }
+            }
+
+            public void RestoreFrom(PersistedStats p)
+            {
+                lock (_lock)
+                {
+                    Count     = p.Count;
+                    Errors    = p.Errors;
+                    MinMs     = p.MinMs;
+                    MaxMs     = p.MaxMs;
+                    AvgMs     = p.AvgMs;
+                    P95Ms     = p.P95Ms;
+                    LastError = p.LastError;
+                    DateTime.TryParse(p.LastSeen, out var dt);
+                    LastSeen  = dt;
+                    _samples.Clear();
+                    for (int i = 0; i < Math.Min(10, (int)p.Count); i++)
+                        _samples.Add((long)p.AvgMs);
+                }
+            }
+        }
+    }
+}

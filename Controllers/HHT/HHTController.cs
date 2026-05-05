@@ -22,7 +22,11 @@ namespace V2HHTMiddleware.Controllers.HHT
         // ── Constants ──────────────────────────────────────────────────────────
         private const string APK_VERSION = "12.108";
         private const string APK_URL     = "https://apk.v2retail.net/download";
-        private const string MW_VERSION  = "v2-hht-azure|5.0";
+        private const string MW_VERSION  = "v2-hht-azure|5.1-qa-fix";
+
+        // SAP RFC proxy at sap-api.v2retail.net — supports ?env=qa and ?env=prod
+        private const string SAP_RFC_PROXY_URL = "https://sap-api.v2retail.net/api/rfc/proxy";
+        private const string SAP_RFC_PROXY_KEY = "v2-rfc-proxy-2026";
 
         // Persistent stats file — survives App Service restarts (D:\home is mounted storage)
         private static readonly string STATS_FILE =
@@ -58,21 +62,23 @@ namespace V2HHTMiddleware.Controllers.HHT
             "getsloc", "validatesloc", "zwm_rfc_validate_dc_sloc",
             "zfms_screen", "zwm_get_grc_bins"
         };
-        private static string CacheKey(string opcode, string store) => opcode + "|" + (store ?? "?");
-        private static bool TryGetCache(string opcode, string store, out string body)
+        // Cache key now includes env so QA and PROD never share cached responses
+        private static string CacheKey(string opcode, string store, string env) =>
+            (env ?? "prod") + "|" + opcode + "|" + (store ?? "?");
+        private static bool TryGetCache(string opcode, string store, string env, out string body)
         {
             body = null;
             if (!CACHEABLE.Contains(opcode)) return false;
-            if (_cache.TryGetValue(CacheKey(opcode, store), out var e) && e.Expires > DateTime.UtcNow)
+            if (_cache.TryGetValue(CacheKey(opcode, store, env), out var e) && e.Expires > DateTime.UtcNow)
             { body = e.Body; return true; }
             return false;
         }
-        private static void SetCache(string opcode, string store, string body)
+        private static void SetCache(string opcode, string store, string env, string body)
         {
             if (!CACHEABLE.Contains(opcode) || string.IsNullOrEmpty(body)) return;
             // Don't cache error responses
             if (body.Contains("E#") || body.Length < 10) return;
-            _cache[CacheKey(opcode, store)] = new CacheEntry { Body = body, Expires = DateTime.UtcNow.Add(CACHE_TTL) };
+            _cache[CacheKey(opcode, store, env)] = new CacheEntry { Body = body, Expires = DateTime.UtcNow.Add(CACHE_TTL) };
             // Evict expired entries periodically (every ~100 cache writes)
             if (_cache.Count > 200)
             {
@@ -328,6 +334,7 @@ namespace V2HHTMiddleware.Controllers.HHT
                 $"|active_opcodes={activeOpcodes}" +
                 $"|registered_opcodes={registeredOpcodes}" +
                 $"|stats_persisted={_statsLoaded}" +
+                $"|qa-fix=enabled" +
                 $"|{DateTime.UtcNow:yyyy-MM-dd HH:mm}UTC"
             );
         }
@@ -486,8 +493,44 @@ namespace V2HHTMiddleware.Controllers.HHT
             return Txt("Stats reset and file cleared.");
         }
 
+        // ─── ENV DETECTION (FIX 2026-05-04) ──────────────────────────────────
+        // Reads env from query string (?env=qa|prod) or X-SAP-ENV / X-Target-Env header.
+        // Defaults to "prod" so existing behaviour is unchanged for callers that
+        // don't pass env (the on-prem Java middleware tunnel goes to prod SAP).
+        private string GetTargetEnv()
+        {
+            try {
+                var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "");
+                var qEnv = (qs["env"] ?? "").Trim().ToLowerInvariant();
+                if (qEnv == "qa" || qEnv == "prod" || qEnv == "dev") return qEnv;
+            } catch { }
+            try {
+                if (Request.Headers.TryGetValues("X-SAP-ENV", out var hv)) {
+                    var v = (hv?.FirstOrDefault() ?? "").Trim().ToLowerInvariant();
+                    if (v == "qa" || v == "prod" || v == "dev") return v;
+                }
+            } catch { }
+            try {
+                if (Request.Headers.TryGetValues("X-Target-Env", out var hv2)) {
+                    var v = (hv2?.FirstOrDefault() ?? "").Trim().ToLowerInvariant();
+                    if (v == "qa" || v == "prod" || v == "dev") return v;
+                }
+            } catch { }
+            return "prod";
+        }
+
         private async Task<HttpResponseMessage> Proxy()
         {
+            string targetEnv = GetTargetEnv();
+
+            // QA (or dev) traffic: bypass on-prem Java middleware (which only reaches PROD SAP)
+            // and forward directly to the SAP RFC proxy with the env hint. This is the
+            // matching behaviour of Path C below for the JSON adaptor route.
+            if (targetEnv == "qa" || targetEnv == "dev")
+            {
+                return await ForwardToSapRfcProxy(targetEnv).ConfigureAwait(false);
+            }
+
             string javaBase = GetJavaBase();
             if (javaBase == null)
                 return LogAndReturn(null, 0, "E#HC tunnel down — cannot reach Server 200", false, "?");
@@ -513,12 +556,13 @@ namespace V2HHTMiddleware.Controllers.HHT
                     if (_deviceSerials.TryGetValue(k, out var ts) && ts < cutoffS) _deviceSerials.TryRemove(k, out _);
             }
 
-            if (TryGetCache(opcode, store, out string cachedBody))
+            if (TryGetCache(opcode, store, targetEnv, out string cachedBody))
             {
                 LogAndReturn(opcode, 0, cachedBody, true, store, userId);
                 var cachedResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                 cachedResp.Content = new StringContent(cachedBody, Encoding.UTF8, "application/json");
                 cachedResp.Headers.Add("X-Cache", "HIT");
+                cachedResp.Headers.Add("X-SAP-ENV", targetEnv);
                 return cachedResp;
             }
 
@@ -554,8 +598,77 @@ namespace V2HHTMiddleware.Controllers.HHT
                 sapOk    = false;
             }
 
-            if (sapOk) SetCache(opcode, store, respBody);
+            if (sapOk) SetCache(opcode, store, targetEnv, respBody);
             return LogAndReturn(opcode, sw.ElapsedMilliseconds, respBody, sapOk, store, userId);
+        }
+
+        // ─── QA/DEV path: forward to SAP RFC proxy with env hint ──────────────
+        // Used when Android app picks "QA Cloud" → CF worker forwards env=qa here.
+        // SAP RFC proxy at sap-api.v2retail.net supports ?env=qa, ?env=prod, default=dev.
+        private async Task<HttpResponseMessage> ForwardToSapRfcProxy(string targetEnv)
+        {
+            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+            string bapi = "";
+            try {
+                var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
+                bapi = jobj["bapiname"]?.ToString() ?? "";
+            } catch { }
+            if (string.IsNullOrEmpty(bapi))
+                bapi = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "")["bapiname"] ?? "noacl";
+            string opcode = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
+                            ? "scnrec" : bapi.ToLowerInvariant();
+            string store  = ExtractStore(rawBody);
+
+            // Cache check (per env)
+            if (TryGetCache(opcode, store, targetEnv, out string cachedBody))
+            {
+                LogAndReturn(opcode + "#" + targetEnv, 0, cachedBody, true, store);
+                var cachedResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+                cachedResp.Content = new StringContent(cachedBody, Encoding.UTF8, "application/json");
+                cachedResp.Headers.Add("X-Cache",   "HIT");
+                cachedResp.Headers.Add("X-SAP-ENV", targetEnv);
+                cachedResp.Headers.Add("X-Routed-Via", "sap-rfc-proxy");
+                return cachedResp;
+            }
+
+            var sw = Stopwatch.StartNew();
+            string proxyUrl = SAP_RFC_PROXY_URL + "?env=" + targetEnv;
+            string respBody; bool sapOk;
+            try
+            {
+                var content = new StringContent(rawBody ?? "{}", Encoding.UTF8);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                var req = new HttpRequestMessage(HttpMethod.Post, proxyUrl) { Content = content };
+                req.Headers.Add("X-RFC-Key",  SAP_RFC_PROXY_KEY);
+                req.Headers.Add("X-SAP-ENV",  targetEnv);
+                var resp = await _http.SendAsync(req).ConfigureAwait(false);
+                sw.Stop();
+                respBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                sapOk    = !string.IsNullOrEmpty(respBody) && respBody.TrimStart().StartsWith("{");
+            }
+            catch (TaskCanceledException)
+            {
+                sw.Stop();
+                respBody = "{\"EX_RETURN\":{\"TYPE\":\"E\",\"MESSAGE\":\"SAP RFC proxy timeout\"}}";
+                sapOk    = false;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                respBody = "{\"EX_RETURN\":{\"TYPE\":\"E\",\"MESSAGE\":\"Proxy error: " +
+                           (ex.Message ?? "").Replace("\"", "'").Replace("\n", " ") + "\"}}";
+                sapOk    = false;
+            }
+
+            if (sapOk) SetCache(opcode, store, targetEnv, respBody);
+
+            LogAndReturn(opcode + "#" + targetEnv, sw.ElapsedMilliseconds, respBody, sapOk, store);
+            var httpOut = Request.CreateResponse(System.Net.HttpStatusCode.OK);
+            httpOut.Content = new StringContent(respBody ?? "", Encoding.UTF8, "application/json");
+            httpOut.Headers.Add("X-Cache",      "MISS");
+            httpOut.Headers.Add("X-SAP-ENV",    targetEnv);
+            httpOut.Headers.Add("X-Routed-Via", "sap-rfc-proxy");
+            return httpOut;
         }
 
         private HttpResponseMessage LogAndReturn(string opcode, long ms, string resp, bool ok, string store, string userId = "")
@@ -807,6 +920,16 @@ namespace V2HHTMiddleware.Controllers.HHT
 
         private async Task<HttpResponseMessage> ProxyNoAcl(string preReadBody = null)
         {
+            // ─── ENV ROUTING (FIX 2026-05-04) ──────────────────────────────────
+            // If env=qa or env=dev is requested via query/header, bypass the on-prem
+            // Java middleware (which only reaches PROD SAP) and forward directly to
+            // the SAP RFC proxy with the env hint.
+            string targetEnv = GetTargetEnv();
+            if (targetEnv == "qa" || targetEnv == "dev")
+            {
+                return await ForwardToSapRfcProxy(targetEnv).ConfigureAwait(false);
+            }
+
             string javaBase = GetJavaBase();
             if (javaBase == null)
                 return LogAndReturn("noacl", 0, "E#HC tunnel down", false, "?");
@@ -856,10 +979,11 @@ namespace V2HHTMiddleware.Controllers.HHT
                     sw.Stop();
                     bool ok = IsInfraOk(noaclRaw);
                     LogAndReturn(opcode, (long)sw.ElapsedMilliseconds, noaclRaw, ok, store);
-                    if (ok) SetCache(opcode, "?", noaclRaw);
+                    if (ok) SetCache(opcode, "?", "prod", noaclRaw);
                     var nativeResp = Request.CreateResponse(System.Net.HttpStatusCode.OK);
                     nativeResp.Content = new StringContent(noaclRaw, Encoding.UTF8, "application/json");
                     nativeResp.Headers.Add("X-Cache", "MISS");
+                    nativeResp.Headers.Add("X-SAP-ENV", "prod");
                     return nativeResp;
                 }
             }
@@ -904,11 +1028,11 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 try
                 {
-                    string proxyUrl = "https://sap-api.v2retail.net/api/rfc/proxy";
+                    string proxyUrl = SAP_RFC_PROXY_URL;
                     var proxyContent = new StringContent(rawBody, Encoding.UTF8);
                     proxyContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                     var proxyReq = new HttpRequestMessage(HttpMethod.Post, proxyUrl) { Content = proxyContent };
-                    proxyReq.Headers.Add("X-RFC-Key", "v2-rfc-proxy-2026");
+                    proxyReq.Headers.Add("X-RFC-Key", SAP_RFC_PROXY_KEY);
                     var proxyResp = await _http.SendAsync(proxyReq).ConfigureAwait(false);
                     string proxyRaw = await proxyResp.Content.ReadAsStringAsync().ConfigureAwait(false);
                     if (!string.IsNullOrEmpty(proxyRaw) && proxyRaw.TrimStart().StartsWith("{"))

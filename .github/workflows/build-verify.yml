@@ -1,0 +1,46 @@
+name: Build Verify (feature branches, no deploy)
+
+# Compiles the solution on any branch that is NOT master/main, and on every PR.
+#
+# WHY THIS EXISTS: deploy.yml triggers on `push: branches: [master, main]` with NO path
+# filter, so any commit that reaches master goes straight to the live Azure app serving
+# ~1000 devices. There is no gate and no build check in between. Without this workflow a
+# PR gets no compile verification at all, and the first time anything is built is the
+# moment it is also deployed.
+#
+# This job builds and stops. It never packages, never publishes, never touches Azure.
+
+on:
+  push:
+    branches-ignore: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: MSBuild compile only
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - uses: NuGet/setup-nuget@v2
+        with: { nuget-version: '6.x' }
+
+      - name: NuGet Restore
+        run: nuget restore V2HHTMiddleware.sln -NonInteractive
+
+      - name: Build
+        shell: powershell
+        run: |
+          msbuild V2HHTMiddleware.sln `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:VisualStudioVersion=17.0 `
+            /m /v:minimal
+
+      - name: Confirm no deploy happened
+        run: echo "Build only. Nothing was packaged or published to Azure."

@@ -28,6 +28,20 @@ namespace V2HHTMiddleware.Controllers.HHT
         private const string SAP_RFC_PROXY_URL = "https://sap-api.v2retail.net/api/rfc/proxy";
         private const string SAP_RFC_PROXY_KEY = "v2-rfc-proxy-2026";
 
+        // Java-MW table compatibility. The legacy middleware on 192.168.144.200 returns
+        // row 0 of every RFC table as SAP field labels rather than data, and this app is
+        // built around that: 38 loops across 22 files are written
+        //   for (int i = 1; i < arr.length(); i++)
+        // to step over it. rfc-api never emitted that row, so every request routed there
+        // has been losing the FIRST REAL DATA ROW of each table — a five-item stock take
+        // showing four. True of dev and qa since the 2026-05-04 env-routing fix.
+        //
+        // rfc-api grew ?labelrow=1 on 2026-08-14 (PRs #36/#37) and it is verified to
+        // reproduce the Java MW payload exactly: 10 of 10 sampled function modules
+        // shape-identical, 43/43 label strings matching. Every call from this middleware
+        // is HHT device traffic, so it always wants the compatible shape.
+        private const string SAP_RFC_PROXY_COMPAT = "&labelrow=1";
+
         // Persistent stats file — survives App Service restarts (D:\home is mounted storage)
         private static readonly string STATS_FILE =
             Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? @"D:\home",
@@ -632,7 +646,7 @@ namespace V2HHTMiddleware.Controllers.HHT
             }
 
             var sw = Stopwatch.StartNew();
-            string proxyUrl = SAP_RFC_PROXY_URL + "?env=" + targetEnv;
+            string proxyUrl = SAP_RFC_PROXY_URL + "?env=" + targetEnv + SAP_RFC_PROXY_COMPAT;
             string respBody; bool sapOk;
             try
             {
@@ -1028,11 +1042,20 @@ namespace V2HHTMiddleware.Controllers.HHT
             {
                 try
                 {
-                    string proxyUrl = SAP_RFC_PROXY_URL;
+                    // env MUST be on the URL. rfc-api's ResolveRfcParams defaults a missing
+                    // env to DEV, so the bare URL sent this PROD device request to SAP DEV
+                    // (.174, client 210) while the device believed it had reached PROD.
+                    // Verified 2026-08-14: POST /api/rfc/proxy with no env answers
+                    // "Sysid: S4D  Logon_Data: 210/SAP_CLOUDAI/E".
+                    // targetEnv is always "prod" here — qa and dev return at the top of
+                    // ProxyNoAcl — but pass it rather than hardcode, so this stays correct
+                    // if the env routing above ever changes. Matches ForwardToSapRfcProxy.
+                    string proxyUrl = SAP_RFC_PROXY_URL + "?env=" + targetEnv + SAP_RFC_PROXY_COMPAT;
                     var proxyContent = new StringContent(rawBody, Encoding.UTF8);
                     proxyContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                     var proxyReq = new HttpRequestMessage(HttpMethod.Post, proxyUrl) { Content = proxyContent };
                     proxyReq.Headers.Add("X-RFC-Key", SAP_RFC_PROXY_KEY);
+                    proxyReq.Headers.Add("X-SAP-ENV", targetEnv);
                     var proxyResp = await _http.SendAsync(proxyReq).ConfigureAwait(false);
                     string proxyRaw = await proxyResp.Content.ReadAsStringAsync().ConfigureAwait(false);
                     if (!string.IsNullOrEmpty(proxyRaw) && proxyRaw.TrimStart().StartsWith("{"))
@@ -1043,6 +1066,11 @@ namespace V2HHTMiddleware.Controllers.HHT
                         pathCResp.Content = new StringContent(proxyRaw, Encoding.UTF8, "application/json");
                         pathCResp.Headers.Add("X-Cache", "MISS");
                         pathCResp.Headers.Add("X-Path", "C");
+                        // Paths A and B both stamp the env they served. C did not, so a
+                        // response that had silently come from DEV was indistinguishable
+                        // from a PROD one at the caller.
+                        pathCResp.Headers.Add("X-SAP-ENV", targetEnv);
+                        pathCResp.Headers.Add("X-Routed-Via", "sap-rfc-proxy");
                         return pathCResp;
                     }
                 }

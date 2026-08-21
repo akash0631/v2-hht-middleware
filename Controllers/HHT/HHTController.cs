@@ -42,6 +42,55 @@ namespace V2HHTMiddleware.Controllers.HHT
         // is HHT device traffic, so it always wants the compatible shape.
         private const string SAP_RFC_PROXY_COMPAT = "&labelrow=1";
 
+        // ── PROD function-module override: send these to rfc-api, not the Java MW ──
+        // The Java middleware on 192.168.144.200 caches JCo function templates and has no
+        // invalidation path — the war contains no removeFunctionTemplateFromCache call — so
+        // a parameter added to an FM by a transport never reaches SAP through it until
+        // Tomcat is restarted. That host cannot be restarted by us: it is a standalone
+        // workgroup box (no AD object, no DNS or NetBIOS record), \\.200\admin$ and
+        // sc.exe are both denied, and its Tomcat manager returns 403 via RemoteAddrValve.
+        //
+        // The resulting failure is silent, which is what makes it dangerous. On 2026-08-21
+        // ZWM_PTL_STATION_VALIDATE returned EX_HUB and EX_RETURN TYPE="S" Success but no
+        // EX_ZONE, because the MW's cached template predates that parameter. The screen
+        // "PTL-Article Putway Storewise" binds EX_ZONE to its HUB/ZONE field, so the field
+        // rendered blank with no error raised anywhere. Path C cannot rescue this — it
+        // triggers only on an explicit failure, and this call succeeds.
+        //
+        // rfc-api on .36 re-reads its metadata from SAP and self-heals (rfc-api PR #32),
+        // and ?labelrow=1 makes its table shape byte-identical to the Java MW, so listing
+        // an FM here moves it off the uncachable path with no change visible to the device.
+        //
+        // Add FMs at runtime with app setting HHT_PROD_FORCE_RFC_API — comma-separated,
+        // replaces this default list, "*" forces every FM. No code deploy required.
+        private static bool _forceAllRfcApi;
+        private static readonly HashSet<string> PROD_FORCE_RFC_API = LoadForceRfcApi();
+
+        private static HashSet<string> LoadForceRfcApi()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ZWM_PTL_STATION_VALIDATE" };
+            try
+            {
+                var cfg = System.Configuration.ConfigurationManager.AppSettings["HHT_PROD_FORCE_RFC_API"];
+                if (!string.IsNullOrWhiteSpace(cfg))
+                {
+                    set.Clear();
+                    foreach (var raw in cfg.Split(','))
+                    {
+                        var fm = raw.Trim();
+                        if (fm.Length == 0) continue;
+                        if (fm == "*") _forceAllRfcApi = true;
+                        else set.Add(fm);
+                    }
+                }
+            }
+            catch { }
+            return set;
+        }
+
+        private static bool ShouldForceRfcApi(string bapi)
+            => _forceAllRfcApi || (!string.IsNullOrEmpty(bapi) && PROD_FORCE_RFC_API.Contains(bapi));
+
         // Persistent stats file — survives App Service restarts (D:\home is mounted storage)
         private static readonly string STATS_FILE =
             Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? @"D:\home",
@@ -619,9 +668,12 @@ namespace V2HHTMiddleware.Controllers.HHT
         // ─── QA/DEV path: forward to SAP RFC proxy with env hint ──────────────
         // Used when Android app picks "QA Cloud" → CF worker forwards env=qa here.
         // SAP RFC proxy at sap-api.v2retail.net supports ?env=qa, ?env=prod, default=dev.
-        private async Task<HttpResponseMessage> ForwardToSapRfcProxy(string targetEnv)
+        // preReadBody: callers that have already consumed Request.Content must pass the
+        // body they read. Re-reading a consumed request stream can yield an empty string,
+        // which would send SAP a call with no parameters at all.
+        private async Task<HttpResponseMessage> ForwardToSapRfcProxy(string targetEnv, string preReadBody = null)
         {
-            string rawBody = await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+            string rawBody = preReadBody ?? await Request.Content.ReadAsStringAsync().ConfigureAwait(false);
             string bapi = "";
             try {
                 var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
@@ -964,6 +1016,12 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             var qs = System.Web.HttpUtility.ParseQueryString(Request.RequestUri?.Query ?? "");
             if (string.IsNullOrEmpty(bapi)) bapi = qs["bapiname"] ?? "noacl";
+
+            // FMs whose metadata is stale in the Java MW's uncachable JCo template cache.
+            // See PROD_FORCE_RFC_API. Path A would answer these with TYPE="S" Success and
+            // silently missing parameters, so there is no error for Path C to fall back on.
+            if (ShouldForceRfcApi(bapi))
+                return await ForwardToSapRfcProxy(targetEnv, rawBody).ConfigureAwait(false);
 
             string opcode  = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)
                              ? "scnrec" : bapi.ToLower();

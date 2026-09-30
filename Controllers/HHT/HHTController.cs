@@ -91,6 +91,15 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static bool ShouldForceRfcApi(string bapi)
             => _forceAllRfcApi || (!string.IsNullOrEmpty(bapi) && PROD_FORCE_RFC_API.Contains(bapi));
 
+        // A JSON array, or a string holding one, is a table row set. See ProxyNoAcl.
+        private static bool IsTableValue(Newtonsoft.Json.Linq.JToken v)
+        {
+            if (v == null) return false;
+            if (v.Type == Newtonsoft.Json.Linq.JTokenType.Array) return true;
+            return v.Type == Newtonsoft.Json.Linq.JTokenType.String
+                && ((string)v).TrimStart().StartsWith("[");
+        }
+
         // Persistent stats file — survives App Service restarts (D:\home is mounted storage)
         private static readonly string STATS_FILE =
             Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? @"D:\home",
@@ -1004,13 +1013,17 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             string bapi  = "";
             var imVals   = new System.Collections.Generic.List<string>();
+            bool hasTableImport = false;
             try
             {
                 var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
                 bapi = jobj["bapiname"]?.ToString() ?? "";
                 foreach (var kv in jobj)
                     if (kv.Key.StartsWith("IM_", System.StringComparison.OrdinalIgnoreCase))
+                    {
                         imVals.Add(kv.Value?.ToString() ?? "");
+                        if (IsTableValue(kv.Value)) hasTableImport = true;
+                    }
             }
             catch { }
 
@@ -1020,7 +1033,13 @@ namespace V2HHTMiddleware.Controllers.HHT
             // FMs whose metadata is stale in the Java MW's uncachable JCo template cache.
             // See PROD_FORCE_RFC_API. Path A would answer these with TYPE="S" Success and
             // silently missing parameters, so there is no error for Path C to fall back on.
-            if (ShouldForceRfcApi(bapi))
+            //
+            // Table-typed IMPORTING parameters (an IM_* value that is a JSON array) are never
+            // bound by the Java MW: its binder sets import fields from scalars only, so the
+            // table reaches SAP empty. 2026-09-30, ZVND_UNLOAD_SAVE_RFC answered "Fill IM_PARMS
+            // first" on PROD while DEV/QA (rfc-api) applied "IM_PARMS (table,1 rows)". rfc-api
+            // binds tables, so any such call goes there without waiting to be listed.
+            if (ShouldForceRfcApi(bapi) || hasTableImport)
                 return await ForwardToSapRfcProxy(targetEnv, rawBody).ConfigureAwait(false);
 
             string opcode  = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)

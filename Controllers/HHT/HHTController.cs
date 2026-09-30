@@ -91,6 +91,61 @@ namespace V2HHTMiddleware.Controllers.HHT
         private static bool ShouldForceRfcApi(string bapi)
             => _forceAllRfcApi || (!string.IsNullOrEmpty(bapi) && PROD_FORCE_RFC_API.Contains(bapi));
 
+        // A JSON array, or a string holding one, is a table row set. See ProxyNoAcl.
+        private static bool IsTableValue(Newtonsoft.Json.Linq.JToken v)
+        {
+            if (v == null) return false;
+            if (v.Type == Newtonsoft.Json.Linq.JTokenType.Array) return true;
+            return v.Type == Newtonsoft.Json.Linq.JTokenType.String
+                && ((string)v).TrimStart().StartsWith("[");
+        }
+
+        // FM -> names of its table-typed IMPORTING parameters, with the time the entry expires.
+        // Read from rfc-api's describe=1, which returns the interface without clearing its
+        // caches. Only requests that carry a table are looked up, so ordinary scans pay nothing.
+        private const string SAP_RFC_DESCRIBE_URL = "https://sap-api.v2retail.net/api/rfc/refresh";
+        private static readonly ConcurrentDictionary<string, KeyValuePair<DateTime, HashSet<string>>> _tableImports =
+            new ConcurrentDictionary<string, KeyValuePair<DateTime, HashSet<string>>>(StringComparer.OrdinalIgnoreCase);
+
+        private static async Task<bool> SendsTableImport(string bapi, List<string> arrayKeys)
+        {
+            if (arrayKeys.Count == 0 || string.IsNullOrEmpty(bapi)) return false;
+            KeyValuePair<DateTime, HashSet<string>> hit;
+            if (!_tableImports.TryGetValue(bapi, out hit) || hit.Key < DateTime.UtcNow)
+            {
+                var set = await ReadTableImports(bapi).ConfigureAwait(false);
+                // A failed read is kept for 5 minutes so an unreachable rfc-api does not add a
+                // timeout to every call; the request then goes to the Java MW as before.
+                var ttl = set == null ? TimeSpan.FromMinutes(5) : TimeSpan.FromHours(6);
+                hit = new KeyValuePair<DateTime, HashSet<string>>(DateTime.UtcNow + ttl,
+                          set ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+                _tableImports[bapi] = hit;
+            }
+            return arrayKeys.Any(hit.Value.Contains);
+        }
+
+        private static async Task<HashSet<string>> ReadTableImports(string bapi)
+        {
+            try
+            {
+                string url = SAP_RFC_DESCRIBE_URL + "?env=prod&describe=1&fm=" + Uri.EscapeDataString(bapi);
+                using (var req = new HttpRequestMessage(HttpMethod.Get, url))
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                {
+                    req.Headers.Add("X-RFC-Key", SAP_RFC_PROXY_KEY);
+                    var resp = await _http.SendAsync(req, cts.Token).ConfigureAwait(false);
+                    var j = Newtonsoft.Json.Linq.JObject.Parse(await resp.Content.ReadAsStringAsync().ConfigureAwait(false));
+                    var iface = j["_INTERFACE"] as Newtonsoft.Json.Linq.JArray;
+                    if (iface == null) return null;
+                    return new HashSet<string>(
+                        iface.Where(p => (string)p["direction"] == "IMPORT" && (string)p["type"] == "TABLE")
+                             .Select(p => (string)p["name"]),
+                        StringComparer.OrdinalIgnoreCase);
+                }
+            }
+            catch { return null; }
+        }
+
         // Persistent stats file — survives App Service restarts (D:\home is mounted storage)
         private static readonly string STATS_FILE =
             Path.Combine(Environment.GetEnvironmentVariable("HOME") ?? @"D:\home",
@@ -1004,13 +1059,17 @@ namespace V2HHTMiddleware.Controllers.HHT
 
             string bapi  = "";
             var imVals   = new System.Collections.Generic.List<string>();
+            var arrayKeys = new System.Collections.Generic.List<string>();
             try
             {
                 var jobj = Newtonsoft.Json.Linq.JObject.Parse(rawBody);
                 bapi = jobj["bapiname"]?.ToString() ?? "";
                 foreach (var kv in jobj)
+                {
                     if (kv.Key.StartsWith("IM_", System.StringComparison.OrdinalIgnoreCase))
                         imVals.Add(kv.Value?.ToString() ?? "");
+                    if (IsTableValue(kv.Value)) arrayKeys.Add(kv.Key);
+                }
             }
             catch { }
 
@@ -1020,7 +1079,14 @@ namespace V2HHTMiddleware.Controllers.HHT
             // FMs whose metadata is stale in the Java MW's uncachable JCo template cache.
             // See PROD_FORCE_RFC_API. Path A would answer these with TYPE="S" Success and
             // silently missing parameters, so there is no error for Path C to fall back on.
-            if (ShouldForceRfcApi(bapi))
+            //
+            // Table-typed IMPORTING parameters are never bound by the Java MW: its binder
+            // sets import fields from scalars only, so the table reaches SAP empty.
+            // 2026-09-30, ZVND_UNLOAD_SAVE_RFC answered "Fill IM_PARMS first" on PROD while
+            // DEV/QA (rfc-api) applied "IM_PARMS (table,1 rows)". TABLES parameters are a
+            // different kind and do work there, so the name or the JSON shape cannot tell
+            // them apart; SendsTableImport reads the FM's interface instead.
+            if (ShouldForceRfcApi(bapi) || await SendsTableImport(bapi, arrayKeys).ConfigureAwait(false))
                 return await ForwardToSapRfcProxy(targetEnv, rawBody).ConfigureAwait(false);
 
             string opcode  = bapi.Equals("ZWM_USER_AUTHORITY_CHECK", System.StringComparison.OrdinalIgnoreCase)

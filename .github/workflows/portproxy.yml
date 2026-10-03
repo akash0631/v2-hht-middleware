@@ -7,8 +7,11 @@ jobs:
     steps:
       - name: Configure netsh portproxy on 200
         shell: powershell
+        env:
+          SERVER200_ADMIN_PASSWORD: ${{ secrets.SERVER200_ADMIN_PASSWORD }}
         run: |
-          $pass = ConvertTo-SecureString 'vrl@55555' -AsPlainText -Force
+          if (-not $env:SERVER200_ADMIN_PASSWORD) { throw 'Set repo secret SERVER200_ADMIN_PASSWORD first' }
+          $pass = ConvertTo-SecureString $env:SERVER200_ADMIN_PASSWORD -AsPlainText -Force
           $cred = New-Object PSCredential('Administrator', $pass)
           $so = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
           $s = New-PSSession -ComputerName 192.168.144.200 -Credential $cred -SessionOption $so

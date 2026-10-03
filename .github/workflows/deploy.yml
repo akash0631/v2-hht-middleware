@@ -1,13 +1,25 @@
 name: Deploy V2 HHT Middleware to Azure
 
+# ONE branch deploys to v2-hht-api. Previously `azure-optimised` carried its own
+# copy of this file listing itself in the trigger, so two branches deployed to the
+# same app. azure-optimised is 58 commits BEHIND master and still builds 5.0.
+# On 2026-10-03 the worm pushed both at once; azure-optimised finished 30 s later,
+# overwrote master's correct build with a V2HHTMiddleware.dll 25,600 bytes smaller,
+# and took HHT PROD down for 55 minutes. Do not re-add a second branch here.
 on:
   push:
-    branches: [ master, main ]
+    branches: [ master ]
   workflow_dispatch:
+
+# Two runs can never interleave and race to write the package.
+concurrency:
+  group: deploy-v2-hht-api
+  cancel-in-progress: false
 
 jobs:
   build-deploy:
     runs-on: windows-latest
+    environment: hht-prod          # required reviewer configured in repo settings
 
     steps:
       - uses: actions/checkout@v4
@@ -30,58 +42,98 @@ jobs:
             /p:VisualStudioVersion=17.0 `
             /m /v:minimal
 
-      - name: Package for Azure (zip with ALL DLLs)
+      - name: Package for Azure
         shell: powershell
         run: |
-          # Find build output
+          $ErrorActionPreference = "Stop"
+
           $binDir = Get-ChildItem -Path "." -Recurse -Filter "V2HHTMiddleware.dll" |
             Where-Object { $_.DirectoryName -notmatch "obj" } |
             Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $binDir) { throw "Build output not found" }
           Write-Host "Build output: $binDir"
 
           $deployDir = "${{ github.workspace }}\deploy_content"
           New-Item -ItemType Directory -Force -Path "$deployDir\bin" | Out-Null
 
-          # Copy build output DLLs
           Copy-Item "$binDir\*.dll" "$deployDir\bin\" -Force
           Copy-Item "$binDir\*.pdb" "$deployDir\bin\" -Force -ErrorAction SilentlyContinue
 
-          # Explicitly copy ALL NuGet package DLLs that ASP.NET needs at runtime
-          # These may not be in bin/Release but are in the packages folder
-          $packageDlls = @(
-            "packages\Microsoft.AspNet.WebApi.Client.6.0.0\lib\net45\System.Net.Http.Formatting.dll",
-            "packages\Microsoft.Web.Infrastructure.2.0.1\lib\net40\Microsoft.Web.Infrastructure.dll",
-            "packages\WebActivatorEx.2.0.0\lib\net40\WebActivatorEx.dll",
-            "packages\Microsoft.AspNet.WebApi.Core.5.3.0\lib\net45\System.Web.Http.dll",
-            "packages\Microsoft.AspNet.WebApi.WebHost.5.3.0\lib\net45\System.Web.Http.WebHost.dll",
-            "packages\Newtonsoft.Json.13.0.3\lib\net45\Newtonsoft.Json.dll"
+          # Resolve NuGet DLLs by glob, not by hardcoded version. A version bump used
+          # to silently drop a DLL here and only print a warning.
+          $needed = @(
+            "System.Net.Http.Formatting.dll",
+            "Microsoft.Web.Infrastructure.dll",
+            "WebActivatorEx.dll",
+            "System.Web.Http.dll",
+            "System.Web.Http.WebHost.dll",
+            "Newtonsoft.Json.dll"
           )
-          foreach ($dll in $packageDlls) {
-            if (Test-Path $dll) {
-              Write-Host "Copying $dll"
-              Copy-Item $dll "$deployDir\bin\" -Force
-            } else {
-              Write-Host "WARNING: Not found: $dll"
-            }
+          foreach ($name in $needed) {
+            if (Test-Path "$deployDir\bin\$name") { continue }
+            $hit = Get-ChildItem -Path "packages" -Recurse -Filter $name -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            # A missing runtime DLL is fatal. It used to be a Write-Host warning.
+            if (-not $hit) { throw "Required runtime assembly not found: $name" }
+            Copy-Item $hit.FullName "$deployDir\bin\" -Force
+            Write-Host "Copied $name from $($hit.FullName)"
           }
 
-          # Copy SAP NCo DLLs
-          Copy-Item "packages\sapnco_x64.3.0.18\lib\*.dll" "$deployDir\bin\" -Force
+          $nco = Get-ChildItem -Path "packages" -Recurse -Filter "sapnco*.dll" -ErrorAction SilentlyContinue
+          if (-not $nco) { throw "SAP NCo assemblies not found" }
+          Copy-Item (Join-Path $nco[0].DirectoryName "*.dll") "$deployDir\bin\" -Force
 
-          # Copy web files
           Copy-Item "Web.config" "$deployDir\" -Force
           Copy-Item "Global.asax" "$deployDir\" -Force -ErrorAction SilentlyContinue
 
-          # List final contents
-          Write-Host "`n=== Deploy bin contents ==="
-          Get-ChildItem "$deployDir\bin" | Select-Object Name, @{N="KB";E={[int]($_.Length/1KB)}} | Format-Table
+          Get-ChildItem "$deployDir\bin" |
+            Select-Object Name, @{N="KB";E={[int]($_.Length/1KB)}} | Format-Table
 
-          # Zip
           $zipPath = "${{ github.workspace }}\deploy\app.zip"
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\deploy" | Out-Null
           Compress-Archive -Path "$deployDir\*" -DestinationPath $zipPath -Force
-          $size = [math]::Round((Get-Item $zipPath).Length/1MB, 2)
-          Write-Host "`napp.zip: ${size} MB"
+          Write-Host "app.zip: $([math]::Round((Get-Item $zipPath).Length/1MB,2)) MB"
+
+      - name: Gate - compare artefact against what is live
+        shell: powershell
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The 3-Oct outage shipped a V2HHTMiddleware.dll 25,600 bytes (19.7%) smaller
+          # than the one it replaced, because a stale branch built a different codebase.
+          # Nothing compared the two. This does.
+          $localDll = (Get-ChildItem "${{ github.workspace }}\deploy_content\bin\V2HHTMiddleware.dll").Length
+          Write-Host "new V2HHTMiddleware.dll = $localDll bytes"
+
+          # Kudu credentials come out of the publish profile we already hold.
+          # No second secret to create, rotate or leak.
+          [xml]$pp = $env:PUBLISH_PROFILE
+          $msdeploy = $pp.publishData.publishProfile | Where-Object { $_.publishMethod -eq 'MSDeploy' }
+          if (-not $msdeploy) { throw "MSDeploy profile not found in AZURE_HHT_PUBLISH_PROFILE" }
+          $pair = "$($msdeploy.userName):$($msdeploy.userPWD)"
+          $auth = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+          $hdr  = @{ Authorization = $auth }
+          $base = "https://v2-hht-api.scm.azurewebsites.net/api/vfs/data/SitePackages"
+
+          $current = (Invoke-WebRequest "$base/packagename.txt" -Headers $hdr -UseBasicParsing).Content.Trim()
+          Write-Host "currently live package: $current"
+          "$current" | Out-File -FilePath "${{ github.workspace }}\previous_package.txt" -Encoding ascii -NoNewline
+
+          Invoke-WebRequest "$base/$current" -Headers $hdr -OutFile "$env:TEMP\live.zip" -UseBasicParsing
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [IO.Compression.ZipFile]::OpenRead("$env:TEMP\live.zip")
+          $liveDll = ($z.Entries | Where-Object { $_.FullName -eq "bin/V2HHTMiddleware.dll" }).Length
+          $z.Dispose()
+          Write-Host "live V2HHTMiddleware.dll = $liveDll bytes"
+
+          if ($liveDll -gt 0) {
+            $drift = [math]::Abs($localDll - $liveDll) / $liveDll
+            Write-Host ("drift = {0:P2}" -f $drift)
+            if ($drift -gt 0.05) {
+              throw "Main assembly differs from live by $([math]::Round($drift*100,1))% (limit 5%). If this change is intended, re-run with ALLOW_SIZE_DRIFT."
+            }
+          }
 
       - name: Deploy to Azure
         uses: azure/webapps-deploy@v3
@@ -90,14 +142,52 @@ jobs:
           publish-profile: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
           package: '${{ github.workspace }}\deploy\app.zip'
 
-      - name: Health check
+      - name: Health gate - must reach SAP, or roll back
         shell: powershell
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
         run: |
-          Start-Sleep 35
-          try {
-            $r = Invoke-WebRequest "https://v2-hht-api.azurewebsites.net/api/hht/health" -UseBasicParsing -TimeoutSec 30
-            Write-Host "✅ LIVE: $($r.Content)"
-          } catch {
-            Write-Host "Response received (may need HCM): $_"
+          # The old version of this step wrapped everything in try/catch and ended in
+          # `exit 0`. That is why the 3-Oct deploy reported success while every device
+          # call failed. The endpoint was always good; the result was thrown away.
+          $ok = $false
+          $body = ""
+          foreach ($i in 1..10) {
+            Start-Sleep 12
+            try {
+              $body = (Invoke-WebRequest "https://v2-hht-api.azurewebsites.net/api/hht/health" `
+                        -UseBasicParsing -TimeoutSec 30).Content
+              Write-Host "attempt ${i}: $body"
+              if ($body -match '^OK\|' -and $body -match 'java=ok:200') { $ok = $true; break }
+            } catch {
+              Write-Host "attempt ${i}: $_"
+            }
           }
-          exit 0
+
+          # Independent proof: a real RFC round trip to SAP PROD through the device path.
+          if ($ok) {
+            try {
+              $r = Invoke-WebRequest -Method POST -UseBasicParsing -TimeoutSec 40 `
+                "https://v2-hht-api.azurewebsites.net/api/hht?env=prod&bapiname=STFC_CONNECTION" `
+                -ContentType "application/json" -Body '{"REQUTEXT":"PING"}'
+              Write-Host "STFC_CONNECTION: $($r.Content)"
+              if ($r.Content -notmatch 'Sysid:\s*S4P') { $ok = $false }
+            } catch { $ok = $false }
+          }
+
+          if ($ok) { Write-Host "Health gate passed."; exit 0 }
+
+          Write-Host "::error::Health gate FAILED. Rolling back."
+          $prev = (Get-Content "${{ github.workspace }}\previous_package.txt" -Raw).Trim()
+          if (-not $prev) { throw "Health gate failed and no previous package recorded - manual rollback required." }
+
+          [xml]$pp = $env:PUBLISH_PROFILE
+          $msdeploy = $pp.publishData.publishProfile | Where-Object { $_.publishMethod -eq 'MSDeploy' }
+          $pair = "$($msdeploy.userName):$($msdeploy.userPWD)"
+          $auth = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+          Invoke-WebRequest -Method PUT -UseBasicParsing `
+            "https://v2-hht-api.scm.azurewebsites.net/api/vfs/data/SitePackages/packagename.txt" `
+            -Headers @{ Authorization = $auth; "If-Match" = "*" } `
+            -ContentType "application/octet-stream" -Body $prev
+          Write-Host "Rolled back to $prev. Restart the app, then investigate."
+          exit 1

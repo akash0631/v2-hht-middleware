@@ -123,16 +123,22 @@ jobs:
           Invoke-WebRequest "$base/$current" -Headers $hdr -OutFile "$env:TEMP\live.zip" -UseBasicParsing
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $z = [IO.Compression.ZipFile]::OpenRead("$env:TEMP\live.zip")
-          $liveDll = ($z.Entries | Where-Object { $_.FullName -eq "bin/V2HHTMiddleware.dll" }).Length
+          # Match on Name, not FullName. Compress-Archive writes entries with BACKSLASH
+          # separators ("bin\V2HHTMiddleware.dll"), so a "bin/..." comparison never matches
+          # and the gate silently measures nothing - the same shape of defect as the health
+          # check that printed a green tick next to java=err on 2026-10-03.
+          $entry = $z.Entries | Where-Object { $_.Name -eq "V2HHTMiddleware.dll" } | Select-Object -First 1
+          $liveDll = if ($entry) { $entry.Length } else { 0 }
           $z.Dispose()
           Write-Host "live V2HHTMiddleware.dll = $liveDll bytes"
 
-          if ($liveDll -gt 0) {
-            $drift = [math]::Abs($localDll - $liveDll) / $liveDll
-            Write-Host ("drift = {0:P2}" -f $drift)
-            if ($drift -gt 0.05) {
-              throw "Main assembly differs from live by $([math]::Round($drift*100,1))% (limit 5%). If this change is intended, re-run with ALLOW_SIZE_DRIFT."
-            }
+          # A gate that cannot measure must fail, never pass quietly.
+          if ($liveDll -le 0) { throw "Could not read V2HHTMiddleware.dll from the live package $current - refusing to deploy blind." }
+
+          $drift = [math]::Abs($localDll - $liveDll) / $liveDll
+          Write-Host ("drift = {0:P2}" -f $drift)
+          if ($drift -gt 0.05) {
+            throw "Main assembly differs from live by $([math]::Round($drift*100,1))% (limit 5%). Deploy blocked. Re-run via workflow_dispatch only if this change is intended."
           }
 
       - name: Deploy to Azure

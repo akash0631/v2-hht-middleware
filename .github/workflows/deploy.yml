@@ -97,8 +97,7 @@ jobs:
       - name: Gate - compare artefact against what is live
         shell: powershell
         env:
-          SCM_USER: ${{ secrets.AZURE_HHT_SCM_USER }}
-          SCM_PASS: ${{ secrets.AZURE_HHT_SCM_PASS }}
+          PUBLISH_PROFILE: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
         run: |
           $ErrorActionPreference = "Stop"
           # The 3-Oct outage shipped a V2HHTMiddleware.dll 25,600 bytes (19.7%) smaller
@@ -107,7 +106,12 @@ jobs:
           $localDll = (Get-ChildItem "${{ github.workspace }}\deploy_content\bin\V2HHTMiddleware.dll").Length
           Write-Host "new V2HHTMiddleware.dll = $localDll bytes"
 
-          $pair = "$($env:SCM_USER):$($env:SCM_PASS)"
+          # Kudu credentials come out of the publish profile we already hold.
+          # No second secret to create, rotate or leak.
+          [xml]$pp = $env:PUBLISH_PROFILE
+          $msdeploy = $pp.publishData.publishProfile | Where-Object { $_.publishMethod -eq 'MSDeploy' }
+          if (-not $msdeploy) { throw "MSDeploy profile not found in AZURE_HHT_PUBLISH_PROFILE" }
+          $pair = "$($msdeploy.userName):$($msdeploy.userPWD)"
           $auth = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
           $hdr  = @{ Authorization = $auth }
           $base = "https://v2-hht-api.scm.azurewebsites.net/api/vfs/data/SitePackages"
@@ -141,8 +145,7 @@ jobs:
       - name: Health gate - must reach SAP, or roll back
         shell: powershell
         env:
-          SCM_USER: ${{ secrets.AZURE_HHT_SCM_USER }}
-          SCM_PASS: ${{ secrets.AZURE_HHT_SCM_PASS }}
+          PUBLISH_PROFILE: ${{ secrets.AZURE_HHT_PUBLISH_PROFILE }}
         run: |
           # The old version of this step wrapped everything in try/catch and ended in
           # `exit 0`. That is why the 3-Oct deploy reported success while every device
@@ -178,7 +181,9 @@ jobs:
           $prev = (Get-Content "${{ github.workspace }}\previous_package.txt" -Raw).Trim()
           if (-not $prev) { throw "Health gate failed and no previous package recorded - manual rollback required." }
 
-          $pair = "$($env:SCM_USER):$($env:SCM_PASS)"
+          [xml]$pp = $env:PUBLISH_PROFILE
+          $msdeploy = $pp.publishData.publishProfile | Where-Object { $_.publishMethod -eq 'MSDeploy' }
+          $pair = "$($msdeploy.userName):$($msdeploy.userPWD)"
           $auth = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
           Invoke-WebRequest -Method PUT -UseBasicParsing `
             "https://v2-hht-api.scm.azurewebsites.net/api/vfs/data/SitePackages/packagename.txt" `
